@@ -32,10 +32,12 @@ import {
 
 import {
   CH_FRAMES,
+  frameWindow,
   inBounds,
   newestRzcTimes,
   renderRgba,
   rzcAssetUrl,
+  rzcProbeCandidates,
   stacItemUrl,
 } from './swiss.js';
 
@@ -368,6 +370,40 @@ async function chBlobUrl(vals) {
 }
 
 /**
+ * Find the newest published frame by probing its deterministic URL directly.
+ * The STAC index is CDN-cached for up to 10 minutes, so trusting it can leave
+ * the timeline ~20 minutes behind; a HEAD on the expected newest URLs is
+ * always fresh (each frame time has its own immutable URL).
+ */
+async function newestSwissTime() {
+  for (const t of rzcProbeCandidates(Date.now() / 1000)) {
+    try {
+      const r = await fetch(rzcAssetUrl(t), { method: 'HEAD', cache: 'no-store' });
+      if (r.ok) return t;
+    } catch {
+      /* transient network error — try the next slot */
+    }
+  }
+  return null;
+}
+
+/** STAC listing as fallback discovery, if the probe scheme ever breaks. */
+async function swissTimesFromStac() {
+  const now = Date.now() / 1000;
+  const items = [];
+  for (const back of [0, 86400]) {
+    try {
+      const r = await fetch(stacItemUrl(now - back), { cache: 'no-store' });
+      if (r.ok) items.push(await r.json());
+    } catch {
+      /* a day item can be missing just after midnight UTC */
+    }
+    if (newestRzcTimes(items, CH_FRAMES).length >= CH_FRAMES) break;
+  }
+  return newestRzcTimes(items, CH_FRAMES);
+}
+
+/**
  * Fetch the newest hour of Swiss frames, decoding only what's new.
  * Newest-first, so the current picture appears immediately; the loop
  * (see tick) holds on the newest frame until the backfill completes.
@@ -376,19 +412,9 @@ async function swissLoadFrames() {
   if (state.ch.loading) return;
   state.ch.loading = true;
   try {
-    const now = Date.now() / 1000;
-    const items = [];
-    for (const back of [0, 86400]) {
-      try {
-        const r = await fetch(stacItemUrl(now - back));
-        if (r.ok) items.push(await r.json());
-      } catch {
-        /* a day item can be missing just after midnight UTC */
-      }
-      if (newestRzcTimes(items, CH_FRAMES).length >= CH_FRAMES) break;
-    }
-    const times = newestRzcTimes(items, CH_FRAMES);
-    if (!times.length) throw new Error('no frames listed');
+    const newest = await newestSwissTime();
+    const times = newest !== null ? frameWindow(newest, CH_FRAMES) : await swissTimesFromStac();
+    if (!times.length) throw new Error('no frames found');
 
     // Prune aged-out frames and their blob URLs.
     const live = new Set(times);
@@ -406,20 +432,32 @@ async function swissLoadFrames() {
       ui.scrub.disabled = false;
     }
 
+    const failed = new Set();
     for (const t of [...times].reverse()) {
       if (state.ch.overlays.has(t)) continue;
-      const res = await fetch(rzcAssetUrl(t));
-      if (!res.ok) throw new Error(`frame HTTP ${res.status}`);
-      const url = await chBlobUrl(chDecode(await res.arrayBuffer()));
-      const overlay = L.imageOverlay(url, state.ch.meta.bounds, { opacity: 0, zIndex: 400 });
-      overlay._blobUrl = url;
-      overlay.addTo(map);
-      state.ch.overlays.set(t, overlay);
-      // Show the newest frame as soon as it exists.
-      if (state.source === 'ch' && t === times[times.length - 1]) {
-        showFrame(state.ch.frames.length - 1);
+      try {
+        const res = await fetch(rzcAssetUrl(t));
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const url = await chBlobUrl(chDecode(await res.arrayBuffer()));
+        const overlay = L.imageOverlay(url, state.ch.meta.bounds, { opacity: 0, zIndex: 400 });
+        overlay._blobUrl = url;
+        overlay.addTo(map);
+        state.ch.overlays.set(t, overlay);
+        // Show the newest frame as soon as it exists.
+        if (state.source === 'ch' && t === times[times.length - 1]) {
+          showFrame(state.ch.frames.length - 1);
+        }
+      } catch {
+        failed.add(t); // a single 5-min slot can be missing — skip, don't abort
       }
     }
+    if (failed.size) {
+      state.ch.frames = state.ch.frames.filter((f) => !failed.has(f.time));
+      if (state.source === 'ch' && state.ch.frames.length) {
+        ui.scrub.max = String(state.ch.frames.length - 1);
+      }
+    }
+    if (!state.ch.overlays.size) throw new Error('no frames available');
   } finally {
     state.ch.loading = false;
   }
@@ -481,6 +519,11 @@ function showFrame(i) {
   ui.stamp.classList.toggle('is-forecast', frame.kind === 'nowcast');
 }
 
+// The loop pauses on the newest frame for a few beats, so a glance at the
+// playing page usually lands on the current picture, not mid-history.
+const NEWEST_DWELL_TICKS = 4;
+let dwell = 0;
+
 function tick() {
   const frames = activeFrames();
   // While the Swiss backfill runs, hold on the newest frame instead of
@@ -489,6 +532,11 @@ function tick() {
     showFrame(frames.length - 1);
     return;
   }
+  if (state.index === frames.length - 1 && dwell < NEWEST_DWELL_TICKS) {
+    dwell += 1;
+    return;
+  }
+  dwell = 0;
   showFrame(nextIndex(state.index, frames.length));
 }
 
@@ -511,7 +559,7 @@ async function loadForecast(lat, lon) {
     '&minutely_15=precipitation&forecast_minutely_15=12&timeformat=unixtime&timezone=UTC';
 
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { cache: 'no-store' }); // same URL, fresh forecast
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const summary = summarizeNowcast(data.minutely_15, Date.now());

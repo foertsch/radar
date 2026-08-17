@@ -50,8 +50,29 @@ export function rzcAssetUrl(t) {
 }
 
 /**
+ * Candidate frame times to probe for the newest frame, newest first.
+ *
+ * The STAC index is CDN-cached for 10 minutes, so trusting it can leave the
+ * timeline up to ~20 minutes behind (CDN age + browser cache). Frame filenames
+ * are deterministic, so freshness comes from probing the newest expected URLs
+ * directly instead — a miss is an uncached 403, a hit is the newest frame.
+ */
+export function rzcProbeCandidates(nowS, maxBack = 6) {
+  const step = 5 * 60;
+  const newest = Math.floor(nowS / step) * step;
+  return Array.from({ length: maxBack + 1 }, (_, k) => newest - k * step);
+}
+
+/** Ascending window of n frame times on the 5-minute grid, ending at newestS. */
+export function frameWindow(newestS, n) {
+  const step = 5 * 60;
+  return Array.from({ length: n }, (_, i) => newestS - (n - 1 - i) * step);
+}
+
+/**
  * Newest n RZC frame times across one or more STAC day items, ascending.
- * Non-RZC assets (cpc, tzc) are ignored.
+ * Non-RZC assets (cpc, tzc) are ignored. Fallback discovery path — see
+ * rzcProbeCandidates for why probing is preferred.
  */
 export function newestRzcTimes(items, n) {
   const times = [];

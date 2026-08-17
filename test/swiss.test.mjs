@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 
 import {
   CH_FRAMES,
+  frameWindow,
   inBounds,
   newestRzcTimes,
   renderRgba,
   rzcAssetUrl,
+  rzcProbeCandidates,
   rzcTimeFromName,
   stacItemUrl,
 } from '../src/swiss.js';
@@ -44,6 +46,27 @@ test('stacItemUrl uses the UTC day', () => {
   assert.match(stacItemUrl(T_0850), /\/items\/20260817-ch$/);
   // 23:55 UTC on Dec 31 must not roll into the next day/year.
   assert.match(stacItemUrl(Date.UTC(2028, 11, 31, 23, 55) / 1000), /20281231-ch$/);
+});
+
+test('rzcProbeCandidates floors to the 5-min grid and walks back newest-first', () => {
+  const now = Date.UTC(2026, 7, 17, 12, 43, 40) / 1000; // 12:43:40Z
+  const c = rzcProbeCandidates(now, 3);
+  assert.deepEqual(
+    c.map((t) => new Date(t * 1000).toISOString().slice(11, 16)),
+    ['12:40', '12:35', '12:30', '12:25'],
+  );
+  // A timestamp already on the grid is its own first candidate.
+  assert.equal(rzcProbeCandidates(T_0850, 0)[0], T_0850);
+});
+
+test('frameWindow ends at the newest frame with 5-min spacing', () => {
+  const w = frameWindow(T_0850, 12);
+  assert.equal(w.length, 12);
+  assert.equal(w.at(-1), T_0850);
+  assert.equal(w[0], T_0850 - 11 * 300);
+  assert.ok(w.every((t, i) => i === 0 || t - w[i - 1] === 300));
+  // Window times must round-trip through the URL scheme.
+  assert.equal(rzcTimeFromName(rzcAssetUrl(w[0]).split('/').pop()), w[0]);
 });
 
 /* -------------------------------------------------------------- frame list --- */
