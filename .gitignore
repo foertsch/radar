@@ -4,3 +4,5 @@ meteoswiss/.venv/
 meteoswiss/out/
 __pycache__/
 .pytest_cache/
+.vercel/
+.vercel
