@@ -21,19 +21,24 @@ import numpy as np
 from PIL import Image
 from pyproj import CRS, Transformer
 
-# Official MeteoSwiss precipitation legend, taken verbatim from the config their
-# own rain-radar app loads (product/output/precipitation/animation/.../animation.json).
-# Pairs of (upper bound in mm/h, hex colour); the last band is open-ended.
+# MeteoSwiss precipitation legend: colours and class bounds are taken verbatim
+# from the config their own rain-radar app loads
+# (product/output/precipitation/animation/.../animation.json). The per-band
+# alpha is our presentation choice — light drizzle covers enormous areas, and
+# at full opacity it walls off the basemap underneath. This table is the single
+# source for both renderers (Python here, JS via lut.json), which keeps the
+# bit-identical browser verification meaningful.
+# Triples of (upper bound in mm/h, hex colour, alpha); the last band is open-ended.
 LEGEND = [
-    (1.0, "9A7E95"),
-    (2.0, "0001FC"),
-    (4.0, "058C2D"),
-    (6.0, "05FF05"),
-    (10.0, "FEFF01"),
-    (20.0, "FFC703"),
-    (40.0, "FF7D01"),
-    (60.0, "FF1900"),
-    (float("inf"), "AF00DD"),
+    (1.0, "9A7E95", 150),
+    (2.0, "0001FC", 200),
+    (4.0, "058C2D", 225),
+    (6.0, "05FF05", 255),
+    (10.0, "FEFF01", 255),
+    (20.0, "FFC703", 255),
+    (40.0, "FF7D01", 255),
+    (60.0, "FF1900", 255),
+    (float("inf"), "AF00DD", 255),
 ]
 
 # rzc + YY + DDD (day of year) + HHMM, e.g. rzc262290850vl.001.h5
@@ -194,18 +199,20 @@ def colorize(values: np.ndarray) -> np.ndarray:
     """mm/h -> RGBA uint8 using the official MeteoSwiss legend.
 
     NaN (outside radar domain) and 0 (undetect — the ODIM file declares
-    undetect=0) are fully transparent; any detected rain gets a band colour.
+    undetect=0) are fully transparent; detected rain gets its band colour with
+    the band's alpha (light bands are translucent so the basemap stays legible).
     """
-    bounds = np.array([b for b, _ in LEGEND[:-1]])
+    bounds = np.array([b for b, _, _ in LEGEND[:-1]])
     lut = np.array(
-        [[int(c[i : i + 2], 16) for i in (0, 2, 4)] for _, c in LEGEND], dtype=np.uint8
+        [[int(c[i : i + 2], 16) for i in (0, 2, 4)] for _, c, _ in LEGEND], dtype=np.uint8
     )
+    alphas = np.array([a for _, _, a in LEGEND], dtype=np.uint8)
     safe = np.nan_to_num(values, nan=0.0)
     idx = np.digitize(safe, bounds)  # value < bounds[i] -> band i; >= last -> len-1
 
     rgba = np.zeros((*values.shape, 4), dtype=np.uint8)
     rgba[..., :3] = lut[idx]
-    rgba[..., 3] = np.where(np.isfinite(values) & (values > 0), 255, 0)
+    rgba[..., 3] = np.where(np.isfinite(values) & (values > 0), alphas[idx], 0)
     return rgba
 
 

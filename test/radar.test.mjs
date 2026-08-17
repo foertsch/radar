@@ -5,6 +5,7 @@ import {
   RADAR_OPTIONS,
   RADAR_MAX_NATIVE_ZOOM,
   buildRadarTileUrl,
+  cloudSlotFor,
   frameLabel,
   haversineKm,
   latestSatelliteSlot,
@@ -122,6 +123,23 @@ test('satelliteSlot walks backwards one 15-minute step at a time', () => {
   assert.equal(satelliteSlot(now, 1), '2026-08-17T07:45:00Z');
   assert.equal(satelliteSlot(now, 2), '2026-08-17T07:30:00Z');
   assert.equal(satelliteSlot(now, 4), '2026-08-17T07:00:00Z');
+});
+
+test('cloudSlotFor gives historical frames their own slot', () => {
+  const now = Date.UTC(2026, 7, 17, 8, 48, 28);
+  // A frame from 90 min ago is well behind the publication lag: true slot.
+  assert.equal(cloudSlotFor(Date.UTC(2026, 7, 17, 7, 20) / 1000, now), '2026-08-17T07:15:00Z');
+  assert.equal(cloudSlotFor(Date.UTC(2026, 7, 17, 7, 0) / 1000, now), '2026-08-17T07:00:00Z');
+});
+
+test('cloudSlotFor clamps recent frames to the newest published slot', () => {
+  const now = Date.UTC(2026, 7, 17, 8, 48, 28);
+  const newest = satelliteSlot(now); // 08:00Z with the 45-min lag
+  // Frames newer than the lag horizon must not request unpublished slots (502).
+  assert.equal(cloudSlotFor(Date.UTC(2026, 7, 17, 8, 45) / 1000, now), newest);
+  assert.equal(cloudSlotFor(now / 1000, now), newest);
+  // Walk-back state lowers the clamp for recent frames too.
+  assert.equal(cloudSlotFor(Date.UTC(2026, 7, 17, 8, 45) / 1000, now, 2), satelliteSlot(now, 2));
 });
 
 /* -------------------------------------------------- summarizeNowcast ------ */

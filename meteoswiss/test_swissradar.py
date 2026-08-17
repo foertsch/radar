@@ -152,9 +152,8 @@ def test_lut_reconstruction_equals_reproject(odim_file):
 def test_colorize_official_bands():
     v = np.array([[np.nan, 0.0, 0.5, 1.0, 2.0, 5.0, 15.0, 100.0]])
     rgba = colorize(v)
-    alpha = rgba[0, :, 3]
-    assert list(alpha[:2]) == [0, 0]  # nodata and undetect transparent
-    assert all(alpha[2:] == 255)
+    # nodata and undetect transparent; light bands translucent; heavy opaque
+    assert list(rgba[0, :, 3]) == [0, 0, 150, 200, 225, 255, 255, 255]
 
     def hex_at(i):
         return "".join(f"{c:02X}" for c in rgba[0, i, :3])

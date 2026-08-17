@@ -50,8 +50,9 @@ def main() -> int:
         "sentinel": SENTINEL,
         "bounds": bounds_latlng(bbox),
         "legend": {
-            "bounds": [b for b, _ in LEGEND[:-1]],
-            "colors": [c for _, c in LEGEND],
+            "bounds": [b for b, _, _ in LEGEND[:-1]],
+            "colors": [c for _, c, _ in LEGEND],
+            "alphas": [a for _, _, a in LEGEND],
         },
         "source_geometry_from": h5s[-1].name,
     }

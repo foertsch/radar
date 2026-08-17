@@ -67,8 +67,9 @@ export function newestRzcTimes(items, n) {
 /**
  * Rain-rate values -> RGBA bytes, mirroring swissradar.colorize exactly:
  * the band colour is always written (bit-exact comparability with the Python
- * reference), alpha is 255 only for finite values > 0. Band minima are
- * inclusive, the top band is open-ended.
+ * reference); finite values > 0 get their band's alpha from the shared legend
+ * (light bands are translucent so the basemap stays legible), everything else
+ * is transparent. Band minima are inclusive, the top band is open-ended.
  *
  * @param {Float64Array} vals source grid, row 0 = north
  * @param {Uint32Array} lut   target pixel -> flat source index (sentinel = outside)
@@ -81,6 +82,7 @@ export function renderRgba(vals, lut, meta) {
   const rgb = meta.legend.colors.map((c) =>
     [0, 2, 4].map((i) => parseInt(c.slice(i, i + 2), 16)),
   );
+  const alphas = meta.legend.alphas ?? meta.legend.colors.map(() => 255);
   const n = width * height;
   if (lut.length !== n) throw new Error(`lut length ${lut.length} != ${n}`);
 
@@ -95,7 +97,7 @@ export function renderRgba(vals, lut, meta) {
     out[o] = rgb[b][0];
     out[o + 1] = rgb[b][1];
     out[o + 2] = rgb[b][2];
-    out[o + 3] = Number.isFinite(v) && v > 0 ? 255 : 0;
+    out[o + 3] = Number.isFinite(v) && v > 0 ? alphas[b] : 0;
   }
   return out;
 }

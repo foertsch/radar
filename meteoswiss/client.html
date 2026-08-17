@@ -98,7 +98,9 @@
       }
 
       // Mirrors swissradar.colorize exactly: band colour always written (so the
-      // pixel test can be exact), alpha 255 only for finite values > 0.
+      // pixel test can be exact), per-band alpha from the shared legend for
+      // finite values > 0.
+      const ALPHAS = META.legend.alphas ?? META.legend.colors.map(() => 255);
       function renderImageData(vals) {
         const n = META.width * META.height;
         const img = new Uint8ClampedArray(n * 4);
@@ -110,7 +112,7 @@
           while (b < BOUNDS.length && safe >= BOUNDS[b]) b++;
           const o = i * 4;
           img[o] = RGB[b][0]; img[o + 1] = RGB[b][1]; img[o + 2] = RGB[b][2];
-          img[o + 3] = Number.isFinite(v) && v > 0 ? 255 : 0;
+          img[o + 3] = Number.isFinite(v) && v > 0 ? ALPHAS[b] : 0;
         }
         return new ImageData(img, META.width, META.height);
       }
@@ -206,15 +208,22 @@
         });
       }
 
-      // Canvas stores premultiplied alpha, so RGB under alpha=0 does not survive
-      // the round trip — compare alpha everywhere, RGB only where alpha=255.
+      // Canvas stores premultiplied alpha, so RGB values with alpha < 255 pick
+      // up deterministic rounding during putImageData/getImageData. The fair
+      // exact comparison is therefore between two images that BOTH went through
+      // the same round trip (the reference via drawImage, ours via roundtrip()).
+      function roundtrip(imageData) {
+        wctx.putImageData(imageData, 0, 0);
+        return wctx.getImageData(0, 0, imageData.width, imageData.height);
+      }
+
       function diff(a, b) {
         if (a.width !== b.width || a.height !== b.height) return { fatal: `size ${a.width}x${a.height} vs ${b.width}x${b.height}` };
         let bad = 0, visible = 0;
         for (let i = 0; i < a.data.length; i += 4) {
           const aa = a.data[i + 3], ba = b.data[i + 3];
           if (aa !== ba) { bad++; continue; }
-          if (aa === 255) {
+          if (aa > 0) {
             visible++;
             if (a.data[i] !== b.data[i] || a.data[i + 1] !== b.data[i + 1] || a.data[i + 2] !== b.data[i + 2]) bad++;
           }
@@ -237,7 +246,7 @@
             const mine = renderImageData(vals);
             const t2 = performance.now();
             const ref = await loadRefImageData('out/' + fr.png);
-            const d = diff(mine, ref);
+            const d = diff(roundtrip(mine), ref);
             if (d.fatal) { addLine(`  ${iso(fr.time)}  FATAL ${d.fatal}`); allOk = false; continue; }
             allOk &&= d.bad === 0;
             addLine(`  ${iso(fr.time)}  decode ${(t1 - t0) | 0}ms render ${(t2 - t1) | 0}ms  mismatched ${d.bad}/${d.total} px (${d.visible} visible)`);

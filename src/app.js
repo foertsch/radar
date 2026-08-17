@@ -9,6 +9,10 @@
  *          view is inside the Swiss composite, with fallback to RainViewer on
  *          any failure.
  *
+ * Layer stack, bottom to top: basemap (no labels) → clouds (z 350) → RainViewer
+ * radar tiles (z 400, tile pane) → Swiss radar overlays (overlay pane) →
+ * place-name labels (own pane, 550) → location pin (marker pane, 600).
+ *
  * All decision logic lives in radar.js / swiss.js so it can be tested without
  * a browser.
  */
@@ -18,11 +22,11 @@ import {
   INDEX_REFRESH_MS,
   RADAR_MAX_NATIVE_ZOOM,
   buildRadarTileUrl,
+  cloudSlotFor,
   frameLabel,
   haversineKm,
   nextIndex,
   parseWeatherMaps,
-  satelliteSlot,
   summarizeNowcast,
 } from './radar.js';
 
@@ -40,6 +44,8 @@ import {
 const FALLBACK_VIEW = { lat: 47.3769, lon: 8.5417, zoom: 7 };
 const FRAME_MS = 500; // animation speed
 const RADAR_OPACITY = 0.75;
+const CLOUD_OPACITY = 0.45; // enough to read cloud structure without burying the map
+const MAX_CLOUD_LAYERS = 16; // 2 h of frames spans ~9 cloud slots; prune beyond this
 const FORECAST_REFRESH_MS = 10 * 60 * 1000;
 const REFETCH_AFTER_KM = 20; // pan further than this and the local forecast is re-fetched
 
@@ -103,62 +109,118 @@ const ATTRIBUTION =
   '<a href="https://www.eumetsat.int/">EUMETSAT</a> | ' +
   '<a href="https://open-meteo.com/">Open-Meteo</a>';
 
-// A muted basemap keeps the radar readable. CARTO ships light and dark variants
-// of the same cartography, so following the OS theme costs one URL swap.
+/**
+ * Basemap split: geography below the data layers, place names above them in
+ * their own pane, so labels stay readable through radar and clouds. CARTO
+ * ships matching nolabels/only_labels variants of both themes.
+ */
 const BASEMAPS = {
-  light: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-  dark: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+  light: {
+    base: 'https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png',
+    labels: 'https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png',
+  },
+  dark: {
+    base: 'https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png',
+    labels: 'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png',
+  },
 };
+
+map.createPane('labels');
+map.getPane('labels').style.zIndex = 550; // data layers < labels < markers (600)
+map.getPane('labels').style.pointerEvents = 'none';
+
 const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
 
-let basemap = L.tileLayer(BASEMAPS[darkQuery.matches ? 'dark' : 'light'], {
-  maxZoom: 19,
-  attribution: ATTRIBUTION,
-}).addTo(map);
+function makeBasemap(dark) {
+  const urls = BASEMAPS[dark ? 'dark' : 'light'];
+  return {
+    base: L.tileLayer(urls.base, { maxZoom: 19, attribution: ATTRIBUTION }).addTo(map),
+    labels: L.tileLayer(urls.labels, { maxZoom: 19, pane: 'labels' }).addTo(map),
+  };
+}
 
+let basemap = makeBasemap(darkQuery.matches);
 map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
 
 darkQuery.addEventListener('change', (e) => {
-  map.removeLayer(basemap);
-  basemap = L.tileLayer(BASEMAPS[e.matches ? 'dark' : 'light'], {
-    maxZoom: 19,
-    attribution: ATTRIBUTION,
-  }).addTo(map);
-  basemap.bringToBack();
+  map.removeLayer(basemap.base);
+  map.removeLayer(basemap.labels);
+  basemap = makeBasemap(e.matches);
+  basemap.base.bringToBack();
 });
+
+/* ------------------------------------------------------------- location pin --- */
+
+const locationPin = L.marker([0, 0], {
+  icon: L.divIcon({ className: 'here-pin', iconSize: [16, 16], iconAnchor: [8, 8] }),
+  interactive: false,
+  keyboard: false,
+});
+
+function pinAt(lat, lon) {
+  locationPin.setLatLng([lat, lon]);
+  if (!map.hasLayer(locationPin)) locationPin.addTo(map);
+}
+
+/* ---------------------------------------------------------------- clouds --- */
 
 /**
- * EUMETSAT Meteosat infrared. The layer only advertises EPSG:4326 in its
+ * EUMETSAT Meteosat infrared, one WMS layer per 15-minute slot so the clouds
+ * move with the radar timelapse. The layer only advertises EPSG:4326 in its
  * capabilities, but GeoServer serves EPSG:3857 fine — which is what Leaflet
- * asks for — so the overlay lines up without client-side reprojection.
+ * asks for. Slots newer than the publication lag 502 rather than clamp, so
+ * cloudSlotFor pins recent frames to the newest safe slot; satSteps walks
+ * further back if even that proves optimistic.
  */
-const satellite = L.tileLayer.wms('https://view.eumetsat.int/geoserver/wms', {
-  layers: 'msg_fes:ir108',
-  format: 'image/png',
-  transparent: true,
-  version: '1.3.0',
-  opacity: 0.45, // enough to read the cloud structure without burying the place names
-  time: satelliteSlot(Date.now()),
-  attribution: '',
-});
-
-// If even the padded lag is too optimistic the server answers 502, so walk back
-// a slot at a time (EUMETSAT publishes ~33 min behind and 502s on future slots).
+const cloudLayers = new Map(); // ISO slot -> L.TileLayer.WMS
 let satSteps = 0;
 let satStepping = false;
-satellite.on('tileerror', () => {
-  if (satStepping || satSteps >= 4) return;
-  satStepping = true;
-  satSteps += 1;
-  satellite.setParams({ time: satelliteSlot(Date.now(), satSteps) });
-  setTimeout(() => (satStepping = false), 2000);
-});
 
-/** Advance the satellite to the newest slot it should have by now. */
-function refreshSatellite() {
-  if (!map.hasLayer(satellite)) return;
-  const next = satelliteSlot(Date.now(), satSteps);
-  if (satellite.wmsParams.time !== next) satellite.setParams({ time: next });
+function cloudLayerFor(slot) {
+  if (cloudLayers.has(slot)) return cloudLayers.get(slot);
+  const layer = L.tileLayer.wms('https://view.eumetsat.int/geoserver/wms', {
+    layers: 'msg_fes:ir108',
+    format: 'image/png',
+    transparent: true,
+    version: '1.3.0',
+    opacity: 0,
+    zIndex: 350, // above the basemap, below both radars
+    time: slot,
+    attribution: '',
+  });
+  layer.on('tileerror', () => {
+    if (satStepping || satSteps >= 4) return;
+    satStepping = true;
+    satSteps += 1;
+    setTimeout(() => (satStepping = false), 2000);
+    showClouds(); // recompute the clamp with the new walk-back state
+  });
+  layer.addTo(map);
+  cloudLayers.set(slot, layer);
+  return layer;
+}
+
+/** Show the cloud slot matching the current radar frame (or hide everything). */
+function showClouds() {
+  const frames = activeFrames();
+  const frame = frames[state.index];
+  if (!ui.sat.checked || !frame) {
+    for (const layer of cloudLayers.values()) layer.setOpacity(0);
+    return;
+  }
+  const slot = cloudSlotFor(frame.time, Date.now(), satSteps);
+  cloudLayerFor(slot);
+  for (const [s, layer] of cloudLayers) layer.setOpacity(s === slot ? CLOUD_OPACITY : 0);
+
+  // Old slots accumulate as the timeline window slides; drop the excess.
+  if (cloudLayers.size > MAX_CLOUD_LAYERS) {
+    for (const s of [...cloudLayers.keys()].sort().slice(0, cloudLayers.size - MAX_CLOUD_LAYERS)) {
+      if (s !== slot) {
+        map.removeLayer(cloudLayers.get(s));
+        cloudLayers.delete(s);
+      }
+    }
+  }
 }
 
 /* ---------------------------------------------------------------- status --- */
@@ -244,7 +306,6 @@ async function loadFrames() {
       showFrame(frames.length - 1); // newest frame, then loop from there
       setStatus('');
     }
-    refreshSatellite(); // same cadence: keep the clouds from going stale
   } catch (err) {
     setStatus(`Could not load radar: ${err.message}`, { sticky: true });
   }
@@ -409,6 +470,8 @@ function showFrame(i) {
     layerFor(nextIndex(state.index, frames.length)); // warm the next frame
   }
 
+  showClouds();
+
   ui.scrub.value = String(state.index);
   const clock = new Date(frame.time * 1000).toLocaleTimeString([], {
     hour: '2-digit',
@@ -492,18 +555,7 @@ ui.ch.addEventListener('change', async () => {
   }
 });
 
-ui.sat.addEventListener('change', () => {
-  if (ui.sat.checked) {
-    satellite.setParams({ time: satelliteSlot(Date.now(), satSteps) });
-    satellite.addTo(map);
-    satellite.bringToFront();
-    // Radar must stay on top of the clouds, or the rain disappears under them.
-    for (const layer of state.layers.values()) layer.bringToFront();
-    for (const overlay of state.ch.overlays.values()) overlay.bringToFront();
-  } else {
-    map.removeLayer(satellite);
-  }
-});
+ui.sat.addEventListener('change', showClouds);
 
 ui.locate.addEventListener('click', () => locate({ announce: true }));
 
@@ -570,6 +622,7 @@ function locate({ announce = false } = {}) {
     (pos) => {
       const { latitude, longitude } = pos.coords;
       map.setView([latitude, longitude], Math.max(map.getZoom(), RADAR_MAX_NATIVE_ZOOM));
+      pinAt(latitude, longitude);
       loadForecast(latitude, longitude);
       maybeAutoSwiss();
     },
@@ -585,7 +638,20 @@ function locate({ announce = false } = {}) {
 
 setPlaying(true);
 loadFrames();
-locate();
+
+// ?at=lat,lon pins an arbitrary spot instead of asking for geolocation —
+// bookmarkable places, and the only way to exercise the pin in tests.
+const atParam = new URLSearchParams(location.search).get('at');
+const at = atParam?.split(',').map(Number);
+if (at?.length === 2 && at.every(Number.isFinite)) {
+  map.setView([at[0], at[1]], Math.max(map.getZoom(), RADAR_MAX_NATIVE_ZOOM));
+  pinAt(at[0], at[1]);
+  loadForecast(at[0], at[1]);
+  maybeAutoSwiss();
+} else {
+  locate();
+}
+
 setInterval(refreshAll, INDEX_REFRESH_MS);
 setInterval(() => {
   state.forecastAt = null; // force a refresh even if the map hasn't moved

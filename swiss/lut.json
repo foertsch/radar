@@ -35,7 +35,18 @@
    "FF7D01",
    "FF1900",
    "AF00DD"
+  ],
+  "alphas": [
+   150,
+   200,
+   225,
+   255,
+   255,
+   255,
+   255,
+   255,
+   255
   ]
  },
- "source_geometry_from": "rzc262290900vl.001.h5"
+ "source_geometry_from": "rzc262291130vl.001.h5"
 }

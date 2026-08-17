@@ -122,6 +122,23 @@ export function satelliteSlot(nowMs, stepsBack = 0) {
 }
 
 /**
+ * The satellite slot to show alongside a radar frame, so the clouds move with
+ * the timelapse instead of freezing at "latest".
+ *
+ * Historical frames get the slot they fall into; frames newer than what
+ * EUMETSAT has published yet (it runs ~SATELLITE_LAG_MIN behind) clamp to the
+ * newest safe slot — requesting beyond it returns HTTP 502, not the nearest
+ * image. `stepsBack` carries the same walk-back state used for "latest".
+ *
+ * @param {number} frameTimeS radar frame time, unix seconds
+ * @param {number} nowMs
+ */
+export function cloudSlotFor(frameTimeS, nowMs, stepsBack = 0) {
+  const lagMs = (SATELLITE_LAG_MIN + stepsBack * SATELLITE_STEP_MIN) * 60 * 1000;
+  return latestSatelliteSlot(Math.min(frameTimeS * 1000, nowMs - lagMs));
+}
+
+/**
  * Turn Open-Meteo's 15-minute precipitation series into one line of plain English.
  *
  * This is the replacement for RainViewer's paid nowcast frames: it answers

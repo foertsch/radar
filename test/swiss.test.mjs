@@ -79,6 +79,7 @@ const META = {
     colors: [
       '9A7E95', '0001FC', '058C2D', '05FF05', 'FEFF01', 'FFC703', 'FF7D01', 'FF1900', 'AF00DD',
     ],
+    alphas: [150, 200, 225, 255, 255, 255, 255, 255, 255],
   },
 };
 
@@ -89,12 +90,18 @@ test('renderRgba mirrors the Python colorize semantics', () => {
   const lut = new Uint32Array([0, 1, 2, 3, 4, 5]);
   const rgba = renderRgba(vals, lut, META);
 
-  assert.deepEqual(px(rgba, 0), [0x9a, 0x7e, 0x95, 255]); // 0-1 band, visible
+  assert.deepEqual(px(rgba, 0), [0x9a, 0x7e, 0x95, 150]); // 0-1 band: translucent drizzle
   assert.deepEqual(px(rgba, 1), [0x9a, 0x7e, 0x95, 0]);   // undetect: colour written, alpha 0
   assert.deepEqual(px(rgba, 2), [0x9a, 0x7e, 0x95, 0]);   // NaN: same
-  assert.deepEqual(px(rgba, 3), [0x00, 0x01, 0xfc, 255]); // band minimum is inclusive
-  assert.deepEqual(px(rgba, 4), [0xff, 0x19, 0x00, 255]); // 40-60
+  assert.deepEqual(px(rgba, 3), [0x00, 0x01, 0xfc, 200]); // band minimum is inclusive
+  assert.deepEqual(px(rgba, 4), [0xff, 0x19, 0x00, 255]); // 40-60: heavy rain opaque
   assert.deepEqual(px(rgba, 5), [0xaf, 0x00, 0xdd, 255]); // open-ended top band
+});
+
+test('renderRgba defaults to opaque when the legend has no alpha table', () => {
+  const meta = { ...META, legend: { bounds: META.legend.bounds, colors: META.legend.colors } };
+  const rgba = renderRgba(new Float64Array([0.5]), new Uint32Array(Array(6).fill(0)), meta);
+  assert.equal(px(rgba, 0)[3], 255);
 });
 
 test('renderRgba treats sentinel pixels as outside the domain', () => {
