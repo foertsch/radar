@@ -7,8 +7,10 @@ no server of its own.
 - **Swiss radar**: official MeteoSwiss 1 km / 5-minute data, decoded and
   rendered *in the browser* — auto-enabled when the view is inside the Swiss
   composite, toggleable, with automatic fallback to RainViewer
-- Centres on your location (falls back to Zürich if you decline)
-- Optional infrared cloud overlay
+- Centres on your location with a pin (falls back to Zürich if you decline);
+  `?at=lat,lon` pins any spot instead
+- Optional infrared cloud overlay that moves with the timelapse
+- Place-name labels render above the weather layers, so the map stays readable
 - A one-line "will it rain on me" forecast for wherever the map is pointed
 
 ## Running it
