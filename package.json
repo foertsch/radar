@@ -1,0 +1,11 @@
+{
+  "name": "radar",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Ad-free weather radar page",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "start": "python3 -m http.server 8000"
+  }
+}

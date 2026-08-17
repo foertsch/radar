@@ -1,0 +1,211 @@
+/* Light and dark are driven entirely by these tokens, so the OS theme swap is
+   a variable change rather than a second stylesheet. */
+:root {
+  --panel: rgba(255, 255, 255, 0.92);
+  --ink: #16202c;
+  --muted: #5c6b7a;
+  --line: rgba(0, 0, 0, 0.1);
+  --accent: #1f6feb;
+  --wet: #0b7285;
+  --dry: #2f6f3e;
+  --shadow: 0 2px 16px rgba(0, 0, 0, 0.18);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --panel: rgba(22, 27, 34, 0.92);
+    --ink: #e6edf3;
+    --muted: #9aa7b4;
+    --line: rgba(255, 255, 255, 0.14);
+    --accent: #58a6ff;
+    --wet: #56d4dd;
+    --dry: #7ee2a8;
+    --shadow: 0 2px 16px rgba(0, 0, 0, 0.5);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--ink);
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+}
+
+/* Panel ------------------------------------------------------------------- */
+
+.panel {
+  position: absolute;
+  z-index: 1000;
+  left: 50%;
+  transform: translateX(-50%);
+  /* Sits above the iPhone home indicator when saved to the home screen. */
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  width: min(560px, calc(100vw - 24px));
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow);
+}
+
+.nowcast {
+  margin: 0 0 10px;
+  font-size: 16px;
+  font-weight: 600;
+  text-align: center;
+}
+.nowcast[data-state="wet"] {
+  color: var(--wet);
+}
+.nowcast[data-state="dry"] {
+  color: var(--dry);
+}
+.nowcast[data-state="unknown"] {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* Timeline ---------------------------------------------------------------- */
+
+.timeline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#play {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  cursor: pointer;
+}
+#play:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+#scrub {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+#scrub:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.stamp {
+  flex: 0 0 auto;
+  min-width: 8.5em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--muted);
+}
+/* Forecast frames, if RainViewer ever serves them on the free tier. */
+.stamp.is-forecast {
+  color: var(--accent);
+  font-style: italic;
+}
+
+/* Options ----------------------------------------------------------------- */
+
+.options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.toggle input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.ghost {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 10px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.ghost:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Status ------------------------------------------------------------------ */
+
+.status {
+  position: absolute;
+  z-index: 1000;
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 24px);
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+}
+
+/* Leaflet ----------------------------------------------------------------- */
+
+.leaflet-container {
+  background: #dfe4ea;
+  font: inherit;
+}
+@media (prefers-color-scheme: dark) {
+  .leaflet-container {
+    background: #10141a;
+  }
+}
+
+.leaflet-control-attribution {
+  background: var(--panel) !important;
+  color: var(--muted);
+  font-size: 10px;
+}
+.leaflet-control-attribution a {
+  color: var(--accent);
+}
+
+/* Keep the attribution clear of the panel where the two would overlap.
+   --panel-h is measured at runtime, since the panel grows when the forecast
+   text wraps. The fallback matters only for the first frame before JS runs. */
+@media (max-width: 760px) {
+  .leaflet-bottom.leaflet-right {
+    bottom: calc(var(--panel-h, 150px) + 18px + env(safe-area-inset-bottom, 0px));
+  }
+}

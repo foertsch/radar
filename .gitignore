@@ -1,0 +1,6 @@
+node_modules/
+.DS_Store
+meteoswiss/.venv/
+meteoswiss/out/
+__pycache__/
+.pytest_cache/

@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Swiss radar — client-side rendering spike</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <style>
+      :root { --panel: rgba(255,255,255,.94); --ink: #16202c; }
+      @media (prefers-color-scheme: dark) { :root { --panel: rgba(22,27,34,.94); --ink: #e6edf3; } }
+      html, body { margin: 0; height: 100%; font: 13px/1.4 system-ui, sans-serif; color: var(--ink); }
+      #map { position: absolute; inset: 0; }
+      .panel {
+        position: absolute; z-index: 1000; left: 50%; transform: translateX(-50%);
+        bottom: 12px; width: min(680px, calc(100vw - 24px));
+        background: var(--panel); border-radius: 12px; padding: 10px 14px;
+        box-shadow: 0 2px 14px rgba(0,0,0,.3);
+      }
+      .row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+      .row input[type=range] { flex: 1; }
+      #stamp { font-variant-numeric: tabular-nums; min-width: 10em; }
+      #log { max-height: 180px; overflow: auto; margin: 6px 0 0; white-space: pre; font: 11px/1.5 ui-monospace, monospace; }
+      .leaflet-image-layer { image-rendering: auto; } /* set to `pixelated` for crisp 1 km blocks */
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div class="panel">
+      <div class="row">
+        <button id="play" type="button">▶</button>
+        <input id="scrub" type="range" min="0" max="0" value="0" step="1" />
+        <span id="stamp">booting…</span>
+        <button id="verify" type="button" disabled>Verify vs Python</button>
+      </div>
+      <pre id="log"></pre>
+    </div>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script type="module">
+      // Shared with the main page: the shipped LUT and vendored decoder live in
+      // the site-level swiss/ directory (serve the repo root, open /meteoswiss/client.html).
+      import h5wasm from '../swiss/h5wasm/hdf5_hl.js';
+
+      const OGD = 'https://data.geo.admin.ch/ch.meteoschweiz.ogd-radar-precip';
+      const STAC = 'https://data.geo.admin.ch/api/stac/v1/collections/ch.meteoschweiz.ogd-radar-precip/items';
+      const FRAMES = 12;
+
+      const logEl = document.getElementById('log');
+      const log = (s) => { logEl.textContent = s; logEl.scrollTop = 1e9; };
+      const lines = [];
+      const addLine = (s) => { lines.push(s); log(lines.join('\n')); };
+
+      /* ------------------------------------------------------------ boot --- */
+
+      const Module = await h5wasm.ready;
+      const FS = Module?.FS ?? h5wasm.FS;
+
+      const META = await (await fetch('../swiss/lut.json')).json();
+      const lutGz = await fetch('../swiss/lut.bin.gz');
+      const lutBuf = await new Response(
+        lutGz.body.pipeThrough(new DecompressionStream('gzip'))
+      ).arrayBuffer();
+      const LUT = new Uint32Array(lutBuf);
+      if (LUT.length !== META.width * META.height) throw new Error('LUT size mismatch');
+      addLine(`lut ${META.width}x${META.height} loaded (${(lutBuf.byteLength / 1e6).toFixed(1)} MB raw)`);
+
+      const BOUNDS = META.legend.bounds;
+      const RGB = META.legend.colors.map((c) => [0, 2, 4].map((i) => parseInt(c.slice(i, i + 2), 16)));
+
+      const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+      const map = L.map('map', { center: [46.8, 8.2], zoom: 7 });
+      L.tileLayer(`https://{s}.basemaps.cartocdn.com/${dark ? 'dark' : 'light'}_all/{z}/{x}/{y}{r}.png`, {
+        maxZoom: 19, attribution: 'Source: MeteoSwiss | © OSM · CARTO',
+      }).addTo(map);
+
+      /* --------------------------------------------------- decode + render --- */
+
+      function decodeH5(buf) {
+        FS.writeFile('cur.h5', new Uint8Array(buf));
+        const f = new h5wasm.File('cur.h5', 'r');
+        const ds = f.get('dataset1/data1/data');
+        const shape = ds.shape;
+        const vals = ds.value; // Float64Array, row 0 = north
+        f.close();
+        FS.unlink('cur.h5');
+        if (shape[0] !== META.ny || shape[1] !== META.nx) throw new Error(`shape ${shape}`);
+        return vals;
+      }
+
+      // Mirrors swissradar.colorize exactly: band colour always written (so the
+      // pixel test can be exact), alpha 255 only for finite values > 0.
+      function renderImageData(vals) {
+        const n = META.width * META.height;
+        const img = new Uint8ClampedArray(n * 4);
+        for (let i = 0; i < n; i++) {
+          const src = LUT[i];
+          const v = src === META.sentinel ? NaN : vals[src];
+          const safe = Number.isFinite(v) ? v : 0;
+          let b = 0;
+          while (b < BOUNDS.length && safe >= BOUNDS[b]) b++;
+          const o = i * 4;
+          img[o] = RGB[b][0]; img[o + 1] = RGB[b][1]; img[o + 2] = RGB[b][2];
+          img[o + 3] = Number.isFinite(v) && v > 0 ? 255 : 0;
+        }
+        return new ImageData(img, META.width, META.height);
+      }
+
+      const work = document.createElement('canvas');
+      work.width = META.width; work.height = META.height;
+      const wctx = work.getContext('2d');
+
+      async function frameToBlobUrl(vals) {
+        wctx.putImageData(renderImageData(vals), 0, 0);
+        const blob = await new Promise((r) => work.toBlob(r, 'image/png'));
+        return URL.createObjectURL(blob);
+      }
+
+      /* ------------------------------------------------------- STAC assets --- */
+
+      const rzcTime = (name) => {
+        const m = /^rzc(\d{2})(\d{3})(\d{2})(\d{2})/.exec(name);
+        if (!m) return null;
+        return Date.UTC(2000 + +m[1], 0, 1) / 1000 + ((+m[2] - 1) * 24 + +m[3]) * 3600 + +m[4] * 60;
+      };
+      const dayStr = (t) => new Date(t * 1000).toISOString().slice(0, 10).replaceAll('-', '');
+      const rzcUrl = (t) => {
+        const d = new Date(t * 1000);
+        const doy = Math.floor((t * 1000 - Date.UTC(d.getUTCFullYear(), 0, 1)) / 864e5) + 1;
+        const p = (x, l) => String(x).padStart(l, '0');
+        const name = `rzc${p(d.getUTCFullYear() % 100, 2)}${p(doy, 3)}${p(d.getUTCHours(), 2)}${p(d.getUTCMinutes(), 2)}vl.001.h5`;
+        return `${OGD}/${dayStr(t)}-ch/${name}`;
+      };
+      const iso = (t) => new Date(t * 1000).toISOString().slice(11, 16) + 'Z';
+
+      async function newestTimes(n) {
+        const now = Date.now() / 1000;
+        let times = [];
+        for (const back of [0, 86400]) {
+          try {
+            const item = await (await fetch(`${STAC}/${dayStr(now - back)}-ch`)).json();
+            times.push(...Object.keys(item.assets ?? {}).map(rzcTime).filter(Boolean));
+          } catch { /* day item may not exist just after midnight UTC */ }
+          if (times.length >= n) break;
+        }
+        return times.sort((a, b) => a - b).slice(-n);
+      }
+
+      /* -------------------------------------------------------- live loop --- */
+
+      const state = { frames: [], overlays: [], idx: 0, playing: false, timer: null };
+      const ui = { play: document.getElementById('play'), scrub: document.getElementById('scrub'), stamp: document.getElementById('stamp') };
+
+      function show(i) {
+        if (!state.frames.length) return;
+        state.idx = ((i % state.frames.length) + state.frames.length) % state.frames.length;
+        state.overlays.forEach((o, k) => o.setOpacity(k === state.idx ? 0.85 : 0));
+        ui.scrub.value = String(state.idx);
+        ui.stamp.textContent = `${iso(state.frames[state.idx])} (${Math.round((Date.now() / 1000 - state.frames[state.idx]) / 60)} min ago)`;
+      }
+      ui.scrub.addEventListener('input', () => { stop(); show(+ui.scrub.value); });
+      ui.play.addEventListener('click', () => (state.playing ? stop() : start()));
+      function start() { state.playing = true; ui.play.textContent = '❚❚'; state.timer = setInterval(() => show(state.idx + 1), 600); }
+      function stop() { state.playing = false; ui.play.textContent = '▶'; clearInterval(state.timer); }
+
+      async function loadLive() {
+        const times = await newestTimes(FRAMES);
+        addLine(`live: newest frame ${iso(times.at(-1))}, data latency ${((Date.now() / 1e3 - times.at(-1)) / 60).toFixed(1)} min`);
+        let ms = 0;
+        for (const t of times) {
+          const t0 = performance.now();
+          const buf = await (await fetch(rzcUrl(t))).arrayBuffer();
+          const url = await frameToBlobUrl(decodeH5(buf));
+          ms += performance.now() - t0;
+          state.overlays.push(L.imageOverlay(url, META.bounds, { opacity: 0, zIndex: 400 }).addTo(map));
+          state.frames.push(t);
+          show(state.frames.length - 1);
+        }
+        addLine(`live: ${times.length} frames fetched+decoded+rendered in ${(ms / 1000).toFixed(1)} s total (${(ms / times.length) | 0} ms/frame avg)`);
+        document.getElementById('verify').disabled = false;
+      }
+
+      /* --------------------------------------- pixel test vs Python output --- */
+
+      function loadRefImageData(src) {
+        return new Promise((resolve, reject) => {
+          const im = new Image();
+          im.onload = () => {
+            const c = document.createElement('canvas');
+            c.width = im.width; c.height = im.height;
+            const ctx = c.getContext('2d', { willReadFrequently: true });
+            ctx.drawImage(im, 0, 0);
+            resolve(ctx.getImageData(0, 0, im.width, im.height));
+          };
+          im.onerror = reject;
+          im.src = src;
+        });
+      }
+
+      // Canvas stores premultiplied alpha, so RGB under alpha=0 does not survive
+      // the round trip — compare alpha everywhere, RGB only where alpha=255.
+      function diff(a, b) {
+        if (a.width !== b.width || a.height !== b.height) return { fatal: `size ${a.width}x${a.height} vs ${b.width}x${b.height}` };
+        let bad = 0, visible = 0;
+        for (let i = 0; i < a.data.length; i += 4) {
+          const aa = a.data[i + 3], ba = b.data[i + 3];
+          if (aa !== ba) { bad++; continue; }
+          if (aa === 255) {
+            visible++;
+            if (a.data[i] !== b.data[i] || a.data[i + 1] !== b.data[i + 1] || a.data[i + 2] !== b.data[i + 2]) bad++;
+          }
+        }
+        return { bad, visible, total: a.data.length / 4 };
+      }
+
+      async function verify() {
+        document.getElementById('verify').disabled = true;
+        const man = await (await fetch('out/frames.json')).json();
+        const sameBounds = JSON.stringify(man.bounds) === JSON.stringify(META.bounds);
+        addLine(`verify: imageOverlay bounds identical to Python: ${sameBounds}`);
+        let allOk = sameBounds;
+        for (const fr of man.frames) {
+          try {
+            const buf = await (await fetch(rzcUrl(fr.time))).arrayBuffer();
+            const t0 = performance.now();
+            const vals = decodeH5(buf);
+            const t1 = performance.now();
+            const mine = renderImageData(vals);
+            const t2 = performance.now();
+            const ref = await loadRefImageData('out/' + fr.png);
+            const d = diff(mine, ref);
+            if (d.fatal) { addLine(`  ${iso(fr.time)}  FATAL ${d.fatal}`); allOk = false; continue; }
+            allOk &&= d.bad === 0;
+            addLine(`  ${iso(fr.time)}  decode ${(t1 - t0) | 0}ms render ${(t2 - t1) | 0}ms  mismatched ${d.bad}/${d.total} px (${d.visible} visible)`);
+          } catch (e) { addLine(`  ${iso(fr.time)}  ERROR ${e.message}`); allOk = false; }
+        }
+        addLine(`PIXEL TEST: ${allOk ? 'PASS — browser output identical to Python reference' : 'FAIL'}`);
+      }
+      document.getElementById('verify').addEventListener('click', verify);
+
+      await loadLive();
+    </script>
+  </body>
+</html>

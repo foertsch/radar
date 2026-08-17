@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Swiss radar MVP — A/B vs RainViewer</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <style>
+      :root { --panel: rgba(255,255,255,.94); --ink: #16202c; }
+      @media (prefers-color-scheme: dark) { :root { --panel: rgba(22,27,34,.94); --ink: #e6edf3; } }
+      html, body { margin: 0; height: 100%; font: 14px/1.4 system-ui, sans-serif; color: var(--ink); }
+      #map { position: absolute; inset: 0; }
+      .panel {
+        position: absolute; z-index: 1000; left: 50%; transform: translateX(-50%);
+        bottom: 12px; width: min(600px, calc(100vw - 24px));
+        background: var(--panel); border-radius: 12px; padding: 10px 14px;
+        box-shadow: 0 2px 14px rgba(0,0,0,.3);
+      }
+      .row { display: flex; align-items: center; gap: 10px; margin: 6px 0; flex-wrap: wrap; }
+      .row input[type=range] { flex: 1; min-width: 120px; }
+      #stamp { font-variant-numeric: tabular-nums; min-width: 11em; }
+      .legend { display: flex; gap: 0; margin-top: 6px; font-size: 10px; }
+      .legend span { flex: 1; text-align: center; padding: 2px 0; color: #fff; text-shadow: 0 0 2px #000; }
+      #mode-label { font-weight: 700; min-width: 7em; }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div class="panel">
+      <div class="row">
+        <label><input type="radio" name="mode" value="swiss" checked /> Swiss (ours)</label>
+        <label><input type="radio" name="mode" value="rv" /> RainViewer</label>
+        <label><input type="radio" name="mode" value="blink" /> Blink A/B</label>
+        <span id="mode-label"></span>
+      </div>
+      <div class="row">
+        <button id="play" type="button">▶</button>
+        <input id="scrub" type="range" min="0" max="0" value="0" step="1" />
+        <span id="stamp">loading…</span>
+      </div>
+      <div class="legend" id="legend" title="mm/h, official MeteoSwiss classes"></div>
+    </div>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script>
+      const LEGEND = [
+        ['<1', '#9A7E95'], ['1', '#0001FC'], ['2', '#058C2D'], ['4', '#05FF05'],
+        ['6', '#FEFF01'], ['10', '#FFC703'], ['20', '#FF7D01'], ['40', '#FF1900'], ['60+', '#AF00DD'],
+      ];
+      document.getElementById('legend').innerHTML = LEGEND
+        .map(([t, c]) => `<span style="background:${c}">${t}</span>`).join('');
+
+      const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+      const map = L.map('map', { center: [46.8, 8.2], zoom: 7 });
+      L.tileLayer(`https://{s}.basemaps.cartocdn.com/${dark ? 'dark' : 'light'}_all/{z}/{x}/{y}{r}.png`, {
+        maxZoom: 19,
+        attribution: 'Source: MeteoSwiss | Weather data by <a href="https://www.rainviewer.com/">RainViewer</a> | © OSM · CARTO',
+      }).addTo(map);
+
+      const state = { frames: [], overlays: [], rv: [], rvLayer: null, idx: 0, mode: 'swiss', playing: false, blinkShowsRV: false };
+      const ui = {
+        play: document.getElementById('play'), scrub: document.getElementById('scrub'),
+        stamp: document.getElementById('stamp'), modeLabel: document.getElementById('mode-label'),
+      };
+
+      async function boot() {
+        const manifest = await (await fetch('out/frames.json')).json();
+        const rvIdx = await (await fetch('https://api.rainviewer.com/public/weather-maps.json')).json();
+        state.rv = rvIdx.radar.past.map(f => ({ time: f.time, url: `${rvIdx.host}${f.path}/512/{z}/{x}/{y}/2/1_1.png` }));
+        state.frames = manifest.frames;
+        state.overlays = manifest.frames.map(f =>
+          // manifest paths are relative to out/, the manifest's own directory
+          L.imageOverlay(`out/${f.png}`, manifest.bounds, { opacity: 0, zIndex: 400 }).addTo(map));
+        ui.scrub.max = String(state.frames.length - 1);
+        show(state.frames.length - 1);
+      }
+
+      function nearestRV(t) {
+        return state.rv.reduce((a, b) => Math.abs(b.time - t) < Math.abs(a.time - t) ? b : a);
+      }
+
+      function show(i) {
+        state.idx = (i + state.frames.length) % state.frames.length;
+        const frame = state.frames[state.idx];
+        const rv = nearestRV(frame.time);
+
+        const swissVisible = state.mode === 'swiss' || (state.mode === 'blink' && !state.blinkShowsRV);
+        state.overlays.forEach((o, k) => o.setOpacity(swissVisible && k === state.idx ? 0.85 : 0));
+
+        const wantRV = state.mode === 'rv' || (state.mode === 'blink' && state.blinkShowsRV);
+        if (state.rvLayer) { map.removeLayer(state.rvLayer); state.rvLayer = null; }
+        if (wantRV) {
+          state.rvLayer = L.tileLayer(rv.url, { maxNativeZoom: 7, opacity: 0.85, zIndex: 401 }).addTo(map);
+        }
+
+        const f = new Date(frame.time * 1000), r = new Date(rv.time * 1000);
+        const hm = d => d.toISOString().slice(11, 16);
+        ui.scrub.value = String(state.idx);
+        ui.stamp.textContent = `CH ${hm(f)}Z · RV ${hm(r)}Z (Δ${Math.round((rv.time - frame.time) / 60)}m)`;
+        ui.modeLabel.textContent =
+          state.mode === 'blink' ? (state.blinkShowsRV ? '◉ RainViewer' : '◉ Swiss') : '';
+      }
+
+      document.querySelectorAll('input[name=mode]').forEach(el =>
+        el.addEventListener('change', () => { state.mode = el.value; show(state.idx); }));
+      ui.scrub.addEventListener('input', () => { stop(); show(Number(ui.scrub.value)); });
+      ui.play.addEventListener('click', () => (state.playing ? stop() : start()));
+
+      let animT = null, blinkT = null;
+      function start() { state.playing = true; ui.play.textContent = '❚❚'; animT = setInterval(() => show(state.idx + 1), 600); }
+      function stop() { state.playing = false; ui.play.textContent = '▶'; clearInterval(animT); }
+      setInterval(() => {
+        if (state.mode === 'blink' && !state.playing) { state.blinkShowsRV = !state.blinkShowsRV; show(state.idx); }
+      }, 900);
+
+      boot();
+    </script>
+  </body>
+</html>
