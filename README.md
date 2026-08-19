@@ -3,7 +3,9 @@
 An ad-free weather radar page. Static files only — no build step, no tracking,
 no server of its own.
 
-- Animated radar loop, playing on load
+- Animated timeline: 30 min of observed radar plus **2 h of forecast**
+  (DWD's nowcast composite, 15-min steps), dwelling on "now" each cycle;
+  forecast timestamps show in accent italics
 - **Swiss radar**: official MeteoSwiss 1 km / 5-minute data, decoded and
   rendered *in the browser* — auto-enabled when the view is inside the Swiss
   composite, toggleable, with automatic fallback to RainViewer
@@ -42,6 +44,7 @@ All four are free, keyless, and used within their published terms.
 | What | Source | Notes |
 | --- | --- | --- |
 | Swiss radar (toggle) | [MeteoSwiss open data](https://opendatadocs.meteoswiss.ch/) | 5 Swiss radars, 1 km, 5-min, CC-BY, ~5–11 min behind real time |
+| Forecast radar (+2 h) | [DWD GeoServer](https://www.dwd.de/DE/leistungen/radarprodukte/radarprodukte.html) | WN composite (analysis+nowcast) via open WMS; German network — sees CH from outside, Valais/Ticino at its range edge. MeteoSwiss's own nowcast (INCA) is on-request only, not open data |
 | Radar tiles | [RainViewer](https://www.rainviewer.com/api.html) | ~1200 radars, 150+ countries — the default outside Switzerland |
 | Cloud imagery | [EUMETSAT View](https://view.eumetsat.int/) | Meteosat SEVIRI IR 10.8 µm, 15-min cadence |
 | Rain forecast | [Open-Meteo](https://open-meteo.com/) | 15-min precipitation, any coordinates |

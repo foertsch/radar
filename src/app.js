@@ -21,8 +21,10 @@ import {
   RAINVIEWER_INDEX,
   INDEX_REFRESH_MS,
   RADAR_MAX_NATIVE_ZOOM,
+  DWD_COVERAGE,
   buildRadarTileUrl,
   cloudSlotFor,
+  forecastTimes,
   frameLabel,
   haversineKm,
   nextIndex,
@@ -45,6 +47,7 @@ import {
 // ceiling, so the default view is exactly as sharp as that data gets.
 const FALLBACK_VIEW = { lat: 47.3769, lon: 8.5417, zoom: 7 };
 const FRAME_MS = 500; // animation speed
+const PAST_MIN = 30; // observed history kept on the timeline; the rest is forecast
 const RADAR_OPACITY = 0.75;
 const CLOUD_OPACITY = 0.45; // enough to read cloud structure without burying the map
 const MAX_CLOUD_LAYERS = 16; // 2 h of frames spans ~9 cloud slots; prune beyond this
@@ -85,9 +88,18 @@ const state = {
   playing: true,
   timer: null,
   forecastAt: null, // {lat, lon} the strip currently describes
+  forecast: [], // [{time, kind: 'nowcast'}] appended after the observed frames
+  forecastDead: new Set(), // step times the newest DWD run couldn't serve
 };
 
-const activeFrames = () => (state.source === 'ch' ? state.ch.frames : state.frames);
+const pastFrames = () => (state.source === 'ch' ? state.ch.frames : state.frames);
+const activeFrames = () => pastFrames().concat(state.forecast);
+
+function syncScrub() {
+  const n = activeFrames().length;
+  ui.scrub.max = String(Math.max(0, n - 1));
+  ui.scrub.disabled = n === 0;
+}
 
 /* ------------------------------------------------------------------ map --- */
 
@@ -108,6 +120,7 @@ const ATTRIBUTION =
   '<a href="https://carto.com/attributions">CARTO</a> | ' +
   'Weather data by <a href="https://www.rainviewer.com/">RainViewer</a> | ' +
   'Source: <a href="https://www.meteoswiss.admin.ch/">MeteoSwiss</a> | ' +
+  'Forecast: <a href="https://www.dwd.de/">DWD</a> | ' +
   '<a href="https://www.eumetsat.int/">EUMETSAT</a> | ' +
   '<a href="https://open-meteo.com/">Open-Meteo</a>';
 
@@ -225,6 +238,74 @@ function showClouds() {
   }
 }
 
+/* -------------------------------------------------------- forecast radar --- */
+
+/**
+ * DWD's WN composite (analysis + nowcast) extends the timeline past "now".
+ * One WMS layer per 15-min step, opacity-switched like everything else.
+ * Omitting REFERENCE_TIME makes GeoServer use the newest model run; a step
+ * beyond that run's horizon answers with a WMS exception, which surfaces as a
+ * tileerror and permanently drops that step for the current window.
+ *
+ * Honest caveats, also in the README: this is the German composite — it sees
+ * Switzerland from outside, so the picture is coarser than the Swiss frames
+ * before it, and Valais/Ticino sit at its range edge.
+ */
+const forecastLayers = new Map(); // ISO time -> L.TileLayer.WMS
+
+const isoOf = (t) => new Date(t * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+function forecastLayerFor(t) {
+  const iso = isoOf(t);
+  if (forecastLayers.has(iso)) return forecastLayers.get(iso);
+  const layer = L.tileLayer.wms('https://maps.dwd.de/geoserver/dwd/wms', {
+    layers: 'dwd:Radar_wn-product_1x1km_ger',
+    format: 'image/png',
+    transparent: true,
+    version: '1.3.0',
+    opacity: 0,
+    zIndex: 400,
+    time: iso,
+    attribution: '',
+  });
+  layer.on('tileerror', () => {
+    if (state.forecastDead.has(t)) return;
+    state.forecastDead.add(t); // beyond the newest run's horizon
+    map.removeLayer(layer);
+    forecastLayers.delete(iso);
+    state.forecast = state.forecast.filter((f) => f.time !== t);
+    syncScrub();
+    if (state.index >= activeFrames().length) showFrame(activeFrames().length - 1);
+  });
+  layer.addTo(map);
+  forecastLayers.set(iso, layer);
+  return layer;
+}
+
+/** Rebuild the forecast tail whenever the newest observed frame or view changes. */
+function updateForecast() {
+  const newest = pastFrames().at(-1)?.time;
+  const c = map.getCenter();
+  const covered = newest && inBounds(DWD_COVERAGE, c.lat, c.lng);
+  const times = covered ? forecastTimes(newest).filter((t) => !state.forecastDead.has(t)) : [];
+
+  state.forecast = times.map((time) => ({ time, kind: 'nowcast' }));
+
+  // Prune layers and dead-marks that aged out of the window.
+  const live = new Set(times.map(isoOf));
+  for (const [iso, layer] of forecastLayers) {
+    if (!live.has(iso)) {
+      map.removeLayer(layer);
+      forecastLayers.delete(iso);
+    }
+  }
+  const window = new Set(newest ? forecastTimes(newest) : []);
+  for (const t of state.forecastDead) if (!window.has(t)) state.forecastDead.delete(t);
+
+  syncScrub();
+  if (state.index >= activeFrames().length) state.index = Math.max(0, activeFrames().length - 1);
+}
+
 /* ---------------------------------------------------------------- status --- */
 
 let statusTimer = null;
@@ -275,7 +356,15 @@ async function loadFrames() {
   try {
     const res = await fetch(RAINVIEWER_INDEX, { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const { host, frames } = parseWeatherMaps(await res.json());
+    const parsed = parseWeatherMaps(await res.json());
+    const host = parsed.host;
+    // Observed frames only, trimmed to the shared 30-min history window —
+    // the timeline's future half comes from the DWD forecast, not RainViewer.
+    let frames = parsed.frames.filter((f) => f.kind === 'past');
+    if (frames.length) {
+      const newest = frames[frames.length - 1].time;
+      frames = frames.filter((f) => f.time >= newest - PAST_MIN * 60);
+    }
 
     if (!frames.length) {
       setStatus('No radar frames available right now.', { sticky: true });
@@ -303,9 +392,8 @@ async function loadFrames() {
     state.frames = frames;
 
     if (state.source === 'rv') {
-      ui.scrub.max = String(frames.length - 1);
-      ui.scrub.disabled = false;
-      showFrame(frames.length - 1); // newest frame, then loop from there
+      updateForecast();
+      showFrame(frames.length - 1); // newest observed frame, then loop from there
       setStatus('');
     }
   } catch (err) {
@@ -427,10 +515,7 @@ async function swissLoadFrames() {
     }
 
     state.ch.frames = times.map((time) => ({ time, kind: 'past' }));
-    if (state.source === 'ch') {
-      ui.scrub.max = String(state.ch.frames.length - 1);
-      ui.scrub.disabled = false;
-    }
+    if (state.source === 'ch') updateForecast();
 
     const failed = new Set();
     for (const t of [...times].reverse()) {
@@ -453,9 +538,7 @@ async function swissLoadFrames() {
     }
     if (failed.size) {
       state.ch.frames = state.ch.frames.filter((f) => !failed.has(f.time));
-      if (state.source === 'ch' && state.ch.frames.length) {
-        ui.scrub.max = String(state.ch.frames.length - 1);
-      }
+      if (state.source === 'ch') updateForecast();
     }
     if (!state.ch.overlays.size) throw new Error('no frames available');
   } finally {
@@ -468,6 +551,7 @@ async function enableSwiss() {
   await swissInit();
   state.source = 'ch';
   await swissLoadFrames();
+  updateForecast();
   showFrame(state.ch.frames.length - 1);
   setStatus('');
 }
@@ -476,7 +560,7 @@ function disableSwiss({ message } = {}) {
   state.source = 'rv';
   ui.ch.checked = false;
   for (const overlay of state.ch.overlays.values()) overlay.setOpacity(0);
-  ui.scrub.max = String(Math.max(0, state.frames.length - 1));
+  updateForecast();
   if (state.frames.length) showFrame(state.frames.length - 1);
   if (message) setStatus(message);
 }
@@ -493,19 +577,30 @@ function showFrame(i) {
   state.index = ((i % frames.length) + frames.length) % frames.length;
   const frame = frames[state.index];
 
-  if (state.source === 'ch') {
+  if (frame.kind === 'nowcast') {
+    // Future: the DWD forecast layer takes over from both observed sources.
+    for (const layer of state.layers.values()) layer.setOpacity(0);
+    for (const overlay of state.ch.overlays.values()) overlay.setOpacity(0);
+    const iso = isoOf(frame.time);
+    forecastLayerFor(frame.time);
+    for (const [s, layer] of forecastLayers) layer.setOpacity(s === iso ? RADAR_OPACITY : 0);
+  } else if (state.source === 'ch') {
+    for (const layer of forecastLayers.values()) layer.setOpacity(0);
     for (const layer of state.layers.values()) layer.setOpacity(0);
     for (const [t, overlay] of state.ch.overlays) {
       overlay.setOpacity(t === frame.time ? RADAR_OPACITY : 0);
     }
   } else {
+    for (const layer of forecastLayers.values()) layer.setOpacity(0);
     for (const overlay of state.ch.overlays.values()) overlay.setOpacity(0);
     for (const [idx, layer] of state.layers) {
       if (idx !== state.index) layer.setOpacity(0);
     }
     const current = layerFor(state.index);
     if (current) current.setOpacity(RADAR_OPACITY);
-    layerFor(nextIndex(state.index, frames.length)); // warm the next frame
+    if (state.index + 1 < state.frames.length) {
+      layerFor(state.index + 1); // warm the next observed frame
+    }
   }
 
   showClouds();
@@ -519,20 +614,22 @@ function showFrame(i) {
   ui.stamp.classList.toggle('is-forecast', frame.kind === 'nowcast');
 }
 
-// The loop pauses on the newest frame for a few beats, so a glance at the
-// playing page usually lands on the current picture, not mid-history.
+// The loop pauses on the "now" frame (newest observed) for a few beats, so a
+// glance at the playing page usually lands on the current picture rather than
+// mid-history or mid-forecast.
 const NEWEST_DWELL_TICKS = 4;
 let dwell = 0;
 
 function tick() {
   const frames = activeFrames();
-  // While the Swiss backfill runs, hold on the newest frame instead of
-  // flashing blank slots for frames that aren't decoded yet.
-  if (state.source === 'ch' && frames.some((f) => !state.ch.overlays.has(f.time))) {
-    showFrame(frames.length - 1);
+  const past = pastFrames();
+  // While the Swiss backfill runs, hold on the newest observed frame instead
+  // of flashing blank slots for frames that aren't decoded yet.
+  if (state.source === 'ch' && past.some((f) => !state.ch.overlays.has(f.time))) {
+    showFrame(past.length - 1);
     return;
   }
-  if (state.index === frames.length - 1 && dwell < NEWEST_DWELL_TICKS) {
+  if (state.index === past.length - 1 && dwell < NEWEST_DWELL_TICKS) {
     dwell += 1;
     return;
   }
@@ -621,7 +718,10 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-map.on('moveend', refreshForecastForView);
+map.on('moveend', () => {
+  refreshForecastForView();
+  updateForecast(); // panning across the DWD coverage edge adds/removes the tail
+});
 
 // Animating a tab nobody is looking at just burns battery and quota.
 document.addEventListener('visibilitychange', () => {

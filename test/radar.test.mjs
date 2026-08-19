@@ -6,6 +6,7 @@ import {
   RADAR_MAX_NATIVE_ZOOM,
   buildRadarTileUrl,
   cloudSlotFor,
+  forecastTimes,
   frameLabel,
   haversineKm,
   latestSatelliteSlot,
@@ -140,6 +141,17 @@ test('cloudSlotFor clamps recent frames to the newest published slot', () => {
   assert.equal(cloudSlotFor(now / 1000, now), newest);
   // Walk-back state lowers the clamp for recent frames too.
   assert.equal(cloudSlotFor(Date.UTC(2026, 7, 17, 8, 45) / 1000, now, 2), satelliteSlot(now, 2));
+});
+
+test('forecastTimes anchors 15-min steps on the newest frame out to +2 h', () => {
+  const newest = Date.UTC(2026, 7, 19, 8, 45) / 1000; // on the 5-min grid
+  const times = forecastTimes(newest);
+  assert.equal(times.length, 8);
+  assert.equal(times[0], newest + 15 * 60);
+  assert.equal(times.at(-1), newest + 120 * 60);
+  assert.ok(times.every((t, i) => i === 0 || t - times[i - 1] === 900));
+  // Every step stays on DWD's 5-minute time grid.
+  assert.ok(times.every((t) => t % 300 === 0));
 });
 
 /* -------------------------------------------------- summarizeNowcast ------ */

@@ -207,6 +207,42 @@ export function summarizeNowcast(minutely, nowMs) {
   };
 }
 
+/* ------------------------------------------------------------- forecast --- */
+
+/**
+ * DWD's WN product (analysis + nowcast, 5-min steps) is the only freely
+ * embeddable gridded precipitation forecast; it reaches 2 hours ahead.
+ * 15-minute display steps are plenty — extrapolation detail below that is
+ * illusory at +1-2 h anyway.
+ */
+export const FORECAST_STEP_MIN = 15;
+export const FORECAST_HORIZON_MIN = 120;
+
+/**
+ * Approximate footprint of the German radar composite, [[south, west],
+ * [north, east]]. Forecast frames are only offered inside it — elsewhere an
+ * empty forecast layer would read as "no rain coming", which is worse than
+ * no forecast. Southwestern Switzerland (Valais/Ticino) sits at the range
+ * edge and is only partially covered.
+ */
+export const DWD_COVERAGE = [
+  [45.7, 3.1],
+  [55.9, 17.0],
+];
+
+/**
+ * Future frame times anchored on the newest observed frame, ascending:
+ * newest+15 min … newest+120 min. Anchoring on the observed frame (itself on
+ * the 5-min grid) keeps every step on DWD's own time grid; steps beyond the
+ * current run's horizon answer with a WMS exception and are dropped by the
+ * caller's tileerror handling.
+ */
+export function forecastTimes(newestS, stepMin = FORECAST_STEP_MIN, horizonMin = FORECAST_HORIZON_MIN) {
+  const out = [];
+  for (let m = stepMin; m <= horizonMin; m += stepMin) out.push(newestS + m * 60);
+  return out;
+}
+
 /**
  * Label one frame relative to now, for the timeline readout.
  * Frames within a couple of minutes of now read as "now" rather than "2 min ago",

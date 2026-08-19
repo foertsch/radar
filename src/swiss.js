@@ -13,8 +13,9 @@ export const OGD_BASE = 'https://data.geo.admin.ch/ch.meteoschweiz.ogd-radar-pre
 export const STAC_ITEMS =
   'https://data.geo.admin.ch/api/stac/v1/collections/ch.meteoschweiz.ogd-radar-precip/items';
 
-/** One hour of 5-minute frames — matches the RainViewer loop's feel. */
-export const CH_FRAMES = 12;
+/** 30 minutes of observed 5-minute frames; the timeline continues into the
+ * forecast (see radar.js forecastTimes), so history stays compact. */
+export const CH_FRAMES = 6;
 
 // rzc + YY + DDD (day of year) + HHMM, e.g. rzc262290850vl.001.h5
 const RZC_NAME = /^rzc(\d{2})(\d{3})(\d{2})(\d{2})/;
