@@ -43,6 +43,9 @@ import {
   stacItemUrl,
 } from './swiss.js';
 
+import { CH_BORDER } from './ch-border.js';
+import { FOREIGN_LABELS, WORLD_RING, focusActive, labelVisible } from './focus.js';
+
 // Zürich, if geolocation is denied. Zoom 7 is the RainViewer radar's native
 // ceiling, so the default view is exactly as sharp as that data gets.
 const FALLBACK_VIEW = { lat: 47.3769, lon: 8.5417, zoom: 7 };
@@ -162,7 +165,95 @@ darkQuery.addEventListener('change', (e) => {
   map.removeLayer(basemap.labels);
   basemap = makeBasemap(e.matches);
   basemap.base.bringToBack();
+  veil.setStyle(VEIL_STYLE[e.matches ? 'dark' : 'light']);
 });
+
+/* ------------------------------------------------------------ Swiss focus --- */
+
+/**
+ * De-emphasize everything outside Switzerland: a gentle veil over foreign
+ * areas (with the border as its edge), the detailed CARTO label layer clipped
+ * to the country, and a curated minimal set of foreign labels instead.
+ * The treatment switches itself off when the view leaves the Swiss region —
+ * a dimmed, label-less map would be useless over Hamburg.
+ */
+map.createPane('veil');
+map.getPane('veil').style.zIndex = 250; // above the basemap, below clouds/radar
+map.getPane('veil').style.pointerEvents = 'none';
+map.createPane('liteLabels'); // minimal foreign labels; never clipped
+map.getPane('liteLabels').style.zIndex = 545;
+map.getPane('liteLabels').style.pointerEvents = 'none';
+
+const VEIL_STYLE = {
+  dark: { fillColor: '#04070b', fillOpacity: 0.42, color: '#8b98a5', opacity: 0.45 },
+  light: { fillColor: '#f6f5f2', fillOpacity: 0.5, color: '#5c6b7a', opacity: 0.4 },
+};
+
+// World ring with Switzerland as a hole; the stroke doubles as the border line.
+const veil = L.polygon([WORLD_RING, CH_BORDER], {
+  pane: 'veil',
+  weight: 1,
+  interactive: false,
+  ...VEIL_STYLE[darkQuery.matches ? 'dark' : 'light'],
+});
+
+const foreignMarkers = FOREIGN_LABELS.map((l) =>
+  L.marker([l.lat, l.lng], {
+    pane: 'liteLabels',
+    interactive: false,
+    keyboard: false,
+    // Leaflet positions the icon element itself via transform, so the
+    // centering translate lives on an inner span (see .geo-label css).
+    icon: L.divIcon({
+      className: `geo-label geo-label--${l.kind}`,
+      html: `<span>${l.name}</span>`,
+      iconSize: null,
+    }),
+  }),
+);
+
+let focusOn = false;
+
+/** Clip the detailed label layer to the border, in layer-point coordinates. */
+function updateLabelsClip() {
+  if (!focusOn) return;
+  const pts = CH_BORDER.map((ll) => {
+    const p = map.latLngToLayerPoint(ll);
+    return `${Math.round(p.x)}px ${Math.round(p.y)}px`;
+  });
+  map.getPane('labels').style.clipPath = `polygon(${pts.join(',')})`;
+}
+
+function updateForeignLabelZoom() {
+  const z = map.getZoom();
+  foreignMarkers.forEach((m, i) => {
+    const el = m.getElement();
+    if (el) el.style.display = focusOn && labelVisible(FOREIGN_LABELS[i], z) ? '' : 'none';
+  });
+}
+
+function setFocus(on) {
+  if (on === focusOn) return;
+  focusOn = on;
+  if (on) {
+    veil.addTo(map);
+    for (const m of foreignMarkers) m.addTo(map);
+    updateLabelsClip();
+  } else {
+    map.removeLayer(veil);
+    for (const m of foreignMarkers) map.removeLayer(m);
+    map.getPane('labels').style.clipPath = '';
+  }
+  updateForeignLabelZoom();
+}
+
+function updateFocus() {
+  const c = map.getCenter();
+  setFocus(focusActive(c.lat, c.lng));
+}
+
+map.on('move zoom viewreset', updateLabelsClip);
+map.on('zoomend', updateForeignLabelZoom);
 
 /* ------------------------------------------------------------- location pin --- */
 
@@ -721,6 +812,7 @@ document.addEventListener('keydown', (e) => {
 map.on('moveend', () => {
   refreshForecastForView();
   updateForecast(); // panning across the DWD coverage edge adds/removes the tail
+  updateFocus(); // leaving the Swiss region restores the full-detail map
 });
 
 // Animating a tab nobody is looking at just burns battery and quota.
@@ -786,6 +878,7 @@ function locate({ announce = false } = {}) {
 
 setPlaying(true);
 loadFrames();
+updateFocus();
 
 // ?at=lat,lon pins an arbitrary spot instead of asking for geolocation —
 // bookmarkable places, and the only way to exercise the pin in tests.

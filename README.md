@@ -13,6 +13,9 @@ no server of its own.
   `?at=lat,lon` pins any spot instead
 - Optional infrared cloud overlay that moves with the timelapse
 - Place-name labels render above the weather layers, so the map stays readable
+- Swiss-focused map: outside the border (Natural Earth polygon) the basemap is
+  gently veiled and detailed labels are replaced by country names + a few big
+  cities; pan away from Switzerland and the map returns to full detail
 - A one-line "will it rain on me" forecast for wherever the map is pointed
 
 ## Running it
