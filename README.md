@@ -47,7 +47,7 @@ All four are free, keyless, and used within their published terms.
 | What | Source | Notes |
 | --- | --- | --- |
 | Swiss radar (toggle) | [MeteoSwiss open data](https://opendatadocs.meteoswiss.ch/) | 5 Swiss radars, 1 km, 5-min, CC-BY, ~5–11 min behind real time |
-| Forecast radar (+2 h) | [DWD GeoServer](https://www.dwd.de/DE/leistungen/radarprodukte/radarprodukte.html) | WN composite (analysis+nowcast) via open WMS; German network — sees CH from outside, Valais/Ticino at its range edge. MeteoSwiss's own nowcast (INCA) is on-request only, not open data |
+| Forecast radar (+2 h) | [DWD GeoServer](https://www.dwd.de/DE/leistungen/radarprodukte/radarprodukte.html) | WN composite (analysis+nowcast) via open WMS, repainted client-side into the MeteoSwiss palette (dBZ→mm/h via Marshall–Palmer) so the timeline looks continuous; German network — sees CH from outside, Valais/Ticino outside its range. MeteoSwiss's own nowcast (INCA) is on-request only, not open data |
 | Radar tiles | [RainViewer](https://www.rainviewer.com/api.html) | ~1200 radars, 150+ countries — the default outside Switzerland |
 | Cloud imagery | [EUMETSAT View](https://view.eumetsat.int/) | Meteosat SEVIRI IR 10.8 µm, 15-min cadence |
 | Rain forecast | [Open-Meteo](https://open-meteo.com/) | 15-min precipitation, any coordinates |

@@ -22,10 +22,12 @@ import {
   INDEX_REFRESH_MS,
   RADAR_MAX_NATIVE_ZOOM,
   DWD_COVERAGE,
+  buildDwdRemap,
   buildRadarTileUrl,
   cloudSlotFor,
   dwdImageUrl,
   forecastTimes,
+  remapDwdImage,
   frameLabel,
   haversineKm,
   nextIndex,
@@ -381,6 +383,7 @@ function dropForecastFrame(t) {
   const info = forecastLayers.get(iso);
   if (info) {
     map.removeLayer(info.overlay);
+    if (info.blobUrl) URL.revokeObjectURL(info.blobUrl);
     forecastLayers.delete(iso);
   }
   state.forecastDead.add(t);
@@ -389,31 +392,94 @@ function dropForecastFrame(t) {
   if (state.index >= activeFrames().length) showFrame(activeFrames().length - 1);
 }
 
+/**
+ * Colour translation DWD -> MeteoSwiss, built once from the shared legend in
+ * swiss/lut.json (fetched directly when Swiss mode never initialised — it's a
+ * 500-byte same-site asset). This is what makes forecast frames look like a
+ * continuation of the observed radar instead of a different app: same palette,
+ * same drizzle translucency, and DWD's no-data grey and domain-border magenta
+ * become transparent.
+ */
+let dwdRemap = null;
+async function getDwdRemap() {
+  if (!dwdRemap) {
+    const legend =
+      state.ch.meta?.legend ?? (await (await fetch('swiss/lut.json')).json()).legend;
+    dwdRemap = buildDwdRemap(legend);
+  }
+  return dwdRemap;
+}
+
+/** Fetch one forecast GetMap, repaint it in MeteoSwiss colours, return a blob URL. */
+async function buildForecastImage(iso, spec) {
+  const res = await fetch(dwdImageUrl(iso, spec.bbox, spec.width, spec.height));
+  const type = res.headers.get('content-type') || '';
+  // A WMS exception (e.g. beyond the newest run's horizon) comes back as XML.
+  if (!res.ok || !type.includes('image')) throw new Error(`WMS refused ${iso}`);
+  const bitmap = await createImageBitmap(await res.blob());
+  const canvas = document.createElement('canvas'); // local: builds run concurrently
+  canvas.width = spec.width;
+  canvas.height = spec.height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(bitmap, 0, 0);
+  const img = ctx.getImageData(0, 0, spec.width, spec.height);
+  remapDwdImage(img.data, await getDwdRemap());
+  ctx.putImageData(img, 0, 0);
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+  return URL.createObjectURL(blob);
+}
+
+function startForecastBuild(t, info, spec) {
+  const iso = isoOf(t);
+  info.building = true;
+  buildForecastImage(iso, spec)
+    .then((url) => {
+      info.building = false;
+      if (!forecastLayers.has(iso)) {
+        URL.revokeObjectURL(url); // pruned while building
+        return;
+      }
+      if (info.blobUrl) URL.revokeObjectURL(info.blobUrl);
+      info.blobUrl = url;
+      info.overlay.setUrl(url);
+    })
+    .catch(() => {
+      info.building = false;
+      if (!info.retried) {
+        // Transient failure gets one retry; a WMS exception fails identically
+        // twice and condemns the frame (revived on the next refresh cycle).
+        info.retried = true;
+        setTimeout(() => {
+          const s = forecastViewSpec();
+          if (s && forecastLayers.has(iso)) startForecastBuild(t, info, s);
+        }, 2500);
+      } else {
+        dropForecastFrame(t);
+      }
+    });
+}
+
+// 1x1 transparent placeholder shown until the repainted image arrives.
+const BLANK_IMG =
+  'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
 function forecastLayerFor(t) {
   const iso = isoOf(t);
   if (forecastLayers.has(iso)) return forecastLayers.get(iso).overlay;
   const spec = forecastViewSpec();
   if (!spec) return null; // hidden/zero-size map — the 'resize' handler rebuilds
-  const overlay = L.imageOverlay(
-    dwdImageUrl(iso, spec.bbox, spec.width, spec.height),
-    spec.bounds,
-    { opacity: 0, zIndex: 400 },
-  );
-  const info = { overlay, builtBounds: spec.bounds, builtZoom: map.getZoom(), retried: false };
-  overlay.on('error', () => {
-    if (!info.retried) {
-      // Transient failure gets one retry; a WMS exception (beyond the newest
-      // run's horizon) fails identically twice and condemns the frame.
-      info.retried = true;
-      const s = forecastViewSpec();
-      if (!s) return; // map lost its size mid-flight; resize will rebuild
-      setTimeout(() => overlay.setUrl(dwdImageUrl(iso, s.bbox, s.width, s.height)), 2000);
-      return;
-    }
-    dropForecastFrame(t);
-  });
+  const overlay = L.imageOverlay(BLANK_IMG, spec.bounds, { opacity: 0, zIndex: 400 });
+  const info = {
+    overlay,
+    builtBounds: spec.bounds,
+    builtZoom: map.getZoom(),
+    retried: false,
+    building: false,
+    blobUrl: null,
+  };
   overlay.addTo(map);
   forecastLayers.set(iso, info);
+  startForecastBuild(t, info, spec);
   return overlay;
 }
 
@@ -424,12 +490,15 @@ function refreshForecastView() {
   const current = map.getBounds();
   const zoom = map.getZoom();
   for (const [iso, info] of forecastLayers) {
-    if (info.builtBounds.contains(current) && zoom - info.builtZoom < 2) continue;
+    if (info.building || (info.builtBounds.contains(current) && zoom - info.builtZoom < 2)) {
+      continue;
+    }
     info.builtBounds = spec.bounds;
     info.builtZoom = zoom;
     info.retried = false;
     info.overlay.setBounds(spec.bounds);
-    info.overlay.setUrl(dwdImageUrl(iso, spec.bbox, spec.width, spec.height));
+    const t = state.forecast.find((f) => isoOf(f.time) === iso)?.time;
+    if (t !== undefined) startForecastBuild(t, info, spec);
   }
 }
 
@@ -452,6 +521,7 @@ function updateForecast() {
   for (const [iso, info] of forecastLayers) {
     if (!live.has(iso)) {
       map.removeLayer(info.overlay);
+      if (info.blobUrl) URL.revokeObjectURL(info.blobUrl);
       forecastLayers.delete(iso);
     }
   }

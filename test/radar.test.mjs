@@ -4,10 +4,13 @@ import assert from 'node:assert/strict';
 import {
   RADAR_OPTIONS,
   RADAR_MAX_NATIVE_ZOOM,
+  buildDwdRemap,
   buildRadarTileUrl,
   cloudSlotFor,
   dwdImageUrl,
   forecastTimes,
+  mmPerHourFromDbz,
+  remapDwdImage,
   frameLabel,
   haversineKm,
   latestSatelliteSlot,
@@ -165,6 +168,49 @@ test('forecastTimes is stable across a 5-min advance of the anchor', () => {
   assert.equal(c[0], a[0] + 900);
   // The first step always lies strictly in the future of the anchor.
   for (const t of [a, c]) assert.ok(t[0] > Date.UTC(2026, 7, 19, 9, 0) / 1000 - 900);
+});
+
+test('mmPerHourFromDbz follows Marshall-Palmer', () => {
+  // Z = 200 R^1.6: R=1 -> 10*log10(200) = 23.01 dBZ
+  assert.ok(Math.abs(mmPerHourFromDbz(23.01) - 1.0) < 0.01);
+  assert.ok(Math.abs(mmPerHourFromDbz(39.0) - 10.0) < 0.2);
+  assert.ok(mmPerHourFromDbz(7) < 0.12); // detection floor ~0.1 mm/h
+});
+
+const LEGEND = {
+  bounds: [1, 2, 4, 6, 10, 20, 40, 60],
+  colors: ['9A7E95', '0001FC', '058C2D', '05FF05', 'FEFF01', 'FFC703', 'FF7D01', 'FF1900', 'AF00DD'],
+  alphas: [150, 200, 225, 255, 255, 255, 255, 255, 255],
+};
+
+test('buildDwdRemap translates DWD style colours to MeteoSwiss bands', () => {
+  const remap = buildDwdRemap(LEGEND);
+  assert.equal(remap.size, 17); // one entry per DWD style interval
+  // [7,9.5) dBZ ~ 0.12 mm/h -> drizzle band, translucent
+  assert.deepEqual(remap.get('153,255,255'), [0x9a, 0x7e, 0x95, 150]);
+  // [23.5,28) dBZ ~ 1.5 mm/h -> 1-2 band
+  assert.deepEqual(remap.get('153,204,0'), [0x00, 0x01, 0xfc, 200]);
+  // [32.5,37) dBZ ~ 5.4 mm/h -> 4-6 band, opaque
+  assert.deepEqual(remap.get('255,255,0'), [0x05, 0xff, 0x05, 255]);
+  // Extreme cores (hail-coded blues/purples) land in the open-ended top band
+  assert.deepEqual(remap.get('72,72,255'), [0xaf, 0x00, 0xdd, 255]);
+  // The no-data grey is NOT in the style table -> not in the remap
+  assert.equal(remap.get('125,125,125'), undefined);
+});
+
+test('remapDwdImage repaints known colours and clears everything else', () => {
+  const remap = buildDwdRemap(LEGEND);
+  const data = new Uint8ClampedArray([
+    153, 255, 255, 255, // DWD lightest -> MeteoSwiss drizzle
+    125, 125, 125, 128, // no-data grey at half opacity -> transparent
+    255, 0, 255, 255,   // magenta domain border -> transparent
+    0, 0, 0, 0,         // already transparent -> untouched
+  ]);
+  remapDwdImage(data, remap);
+  assert.deepEqual([...data.slice(0, 4)], [0x9a, 0x7e, 0x95, 150]);
+  assert.equal(data[7], 0);
+  assert.equal(data[11], 0);
+  assert.deepEqual([...data.slice(12)], [0, 0, 0, 0]);
 });
 
 test('dwdImageUrl builds a single-image GetMap with all required params', () => {

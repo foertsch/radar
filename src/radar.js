@@ -235,6 +235,86 @@ export function dwdImageUrl(iso, bbox, width, height) {
 }
 
 /**
+ * DWD's default WN style, verbatim from a WMS GetStyles response
+ * (SLD ColorMap, type "intervals"): [lower dBZ, upper dBZ, hex colour].
+ * DWD forbids dynamic SLDs, so the page repaints these colours client-side
+ * into the MeteoSwiss palette (buildDwdRemap) for a visually continuous
+ * timeline. The style's "no data" grey (#7d7d7d at half opacity) and the
+ * domain-border magenta are NOT listed — unknown colours remap to transparent,
+ * which removes them.
+ */
+export const DWD_STYLE_DBZ = [
+  [7, 9.5, '99ffff'],
+  [9.5, 12, '33ffff'],
+  [12, 14.5, '00caca'],
+  [14.5, 19, '009934'],
+  [19, 23.5, '4dbf1a'],
+  [23.5, 28, '99cc00'],
+  [28, 32.5, 'cce600'],
+  [32.5, 37, 'ffff00'],
+  [37, 41.5, 'ffc400'],
+  [41.5, 46, 'ff8900'],
+  [46, 50.5, 'ff0000'],
+  [50.5, 55, 'b40000'],
+  [55, 60, '4848ff'],
+  [60, 65, '0000ca'],
+  [65, 75, '990099'],
+  [75, 85, 'ff33ff'],
+  [85, 95, '000000'],
+];
+
+/** Rain rate in mm/h from reflectivity, Marshall-Palmer Z = 200 R^1.6. */
+export function mmPerHourFromDbz(dbz) {
+  return (10 ** (dbz / 10) / 200) ** (1 / 1.6);
+}
+
+/**
+ * Colour translation table: DWD style colour -> MeteoSwiss band RGBA.
+ * Each DWD dBZ interval is assigned the band its midpoint rain rate falls in;
+ * the band's alpha comes from the shared legend, so forecast drizzle is as
+ * translucent as observed drizzle.
+ *
+ * @param {{bounds: number[], colors: string[], alphas?: number[]}} legend swiss/lut.json legend
+ * @returns {Map<string, number[]>} 'r,g,b' -> [r, g, b, a]
+ */
+export function buildDwdRemap(legend) {
+  const hex = (c) => [0, 2, 4].map((i) => parseInt(c.slice(i, i + 2), 16));
+  const alphas = legend.alphas ?? legend.colors.map(() => 255);
+  const remap = new Map();
+  for (const [lo, hi, color] of DWD_STYLE_DBZ) {
+    const rate = mmPerHourFromDbz((lo + hi) / 2);
+    let band = 0;
+    while (band < legend.bounds.length && rate >= legend.bounds[band]) band++;
+    remap.set(hex(color).join(','), [...hex(legend.colors[band]), alphas[band]]);
+  }
+  return remap;
+}
+
+/**
+ * Repaint a DWD GetMap image in place: known style colours become their
+ * MeteoSwiss equivalents, everything else (no-data grey, domain borders,
+ * antialiased blends) becomes transparent.
+ *
+ * @param {Uint8ClampedArray} data RGBA pixels (ImageData.data)
+ * @param {Map<string, number[]>} remap from buildDwdRemap
+ */
+export function remapDwdImage(data, remap) {
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] === 0) continue;
+    const mapped = remap.get(`${data[i]},${data[i + 1]},${data[i + 2]}`);
+    if (mapped) {
+      data[i] = mapped[0];
+      data[i + 1] = mapped[1];
+      data[i + 2] = mapped[2];
+      data[i + 3] = mapped[3];
+    } else {
+      data[i + 3] = 0;
+    }
+  }
+  return data;
+}
+
+/**
  * Approximate footprint of the German radar composite, [[south, west],
  * [north, east]]. Forecast frames are only offered inside it — elsewhere an
  * empty forecast layer would read as "no rain coming", which is worse than
