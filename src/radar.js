@@ -219,6 +219,22 @@ export const FORECAST_STEP_MIN = 15;
 export const FORECAST_HORIZON_MIN = 120;
 
 /**
+ * Single-image WMS GetMap URL for one forecast step over a 3857 bbox.
+ *
+ * DWD's GeoServer takes ~5 s per GetMap and serializes concurrent requests
+ * from one client, so tiled loading (dozens of tiles x 8 steps) can never
+ * finish. One padded-viewport image per step keeps the whole forecast at
+ * 8 requests, loaded nearest-first and reused until the view outgrows it.
+ */
+export function dwdImageUrl(iso, bbox, width, height) {
+  return (
+    'https://maps.dwd.de/geoserver/dwd/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap' +
+    '&LAYERS=dwd:Radar_wn-product_1x1km_ger&STYLES=&FORMAT=image/png&TRANSPARENT=TRUE' +
+    `&CRS=EPSG:3857&BBOX=${bbox.join(',')}&WIDTH=${width}&HEIGHT=${height}&TIME=${iso}`
+  );
+}
+
+/**
  * Approximate footprint of the German radar composite, [[south, west],
  * [north, east]]. Forecast frames are only offered inside it — elsewhere an
  * empty forecast layer would read as "no rain coming", which is worse than
@@ -231,16 +247,20 @@ export const DWD_COVERAGE = [
 ];
 
 /**
- * Future frame times anchored on the newest observed frame, ascending:
- * newest+15 min … newest+120 min. Anchoring on the observed frame (itself on
- * the 5-min grid) keeps every step on DWD's own time grid; steps beyond the
+ * Future frame times after the newest observed frame, ascending, aligned to
+ * the absolute 15-minute grid (…:00, :15, :30, :45) rather than offset from
+ * the anchor. Grid alignment means a 5-minute advance of the newest frame
+ * usually produces the *same* time list, so the WMS layers built for the
+ * previous cycle are reused instead of being pruned and re-requested — the
+ * re-request flood was what left forecast frames blank. Steps beyond the
  * current run's horizon answer with a WMS exception and are dropped by the
  * caller's tileerror handling.
  */
 export function forecastTimes(newestS, stepMin = FORECAST_STEP_MIN, horizonMin = FORECAST_HORIZON_MIN) {
-  const out = [];
-  for (let m = stepMin; m <= horizonMin; m += stepMin) out.push(newestS + m * 60);
-  return out;
+  const step = stepMin * 60;
+  const first = Math.floor(newestS / step) * step + step;
+  const n = Math.floor(horizonMin / stepMin);
+  return Array.from({ length: n }, (_, i) => first + i * step);
 }
 
 /**

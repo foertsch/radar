@@ -6,6 +6,7 @@ import {
   RADAR_MAX_NATIVE_ZOOM,
   buildRadarTileUrl,
   cloudSlotFor,
+  dwdImageUrl,
   forecastTimes,
   frameLabel,
   haversineKm,
@@ -143,15 +144,38 @@ test('cloudSlotFor clamps recent frames to the newest published slot', () => {
   assert.equal(cloudSlotFor(Date.UTC(2026, 7, 17, 8, 45) / 1000, now, 2), satelliteSlot(now, 2));
 });
 
-test('forecastTimes anchors 15-min steps on the newest frame out to +2 h', () => {
-  const newest = Date.UTC(2026, 7, 19, 8, 45) / 1000; // on the 5-min grid
+test('forecastTimes gives 8 grid-aligned steps after the newest frame', () => {
+  const newest = Date.UTC(2026, 7, 19, 8, 45) / 1000; // already on the 15-min grid
   const times = forecastTimes(newest);
   assert.equal(times.length, 8);
   assert.equal(times[0], newest + 15 * 60);
   assert.equal(times.at(-1), newest + 120 * 60);
   assert.ok(times.every((t, i) => i === 0 || t - times[i - 1] === 900));
-  // Every step stays on DWD's 5-minute time grid.
-  assert.ok(times.every((t) => t % 300 === 0));
+  assert.ok(times.every((t) => t % 900 === 0)); // absolute 15-min grid
+});
+
+test('forecastTimes is stable across a 5-min advance of the anchor', () => {
+  // 08:45 and 08:50 floor to the same grid slot -> identical layer times,
+  // so a refresh reuses the already-loaded WMS layers instead of re-requesting.
+  const a = forecastTimes(Date.UTC(2026, 7, 19, 8, 45) / 1000);
+  const b = forecastTimes(Date.UTC(2026, 7, 19, 8, 50) / 1000);
+  assert.deepEqual(a, b);
+  // Crossing the grid boundary shifts by exactly one step.
+  const c = forecastTimes(Date.UTC(2026, 7, 19, 9, 0) / 1000);
+  assert.equal(c[0], a[0] + 900);
+  // The first step always lies strictly in the future of the anchor.
+  for (const t of [a, c]) assert.ok(t[0] > Date.UTC(2026, 7, 19, 9, 0) / 1000 - 900);
+});
+
+test('dwdImageUrl builds a single-image GetMap with all required params', () => {
+  const url = dwdImageUrl('2026-08-21T09:15:00Z', [626172, 5948635, 1252344, 6574807], 1400, 900);
+  assert.match(url, /^https:\/\/maps\.dwd\.de\/geoserver\/dwd\/wms\?/);
+  assert.match(url, /LAYERS=dwd:Radar_wn-product_1x1km_ger/);
+  assert.match(url, /CRS=EPSG:3857/);
+  assert.match(url, /BBOX=626172,5948635,1252344,6574807/);
+  assert.match(url, /WIDTH=1400&HEIGHT=900/);
+  assert.match(url, /TIME=2026-08-21T09:15:00Z/);
+  assert.match(url, /TRANSPARENT=TRUE/);
 });
 
 /* -------------------------------------------------- summarizeNowcast ------ */

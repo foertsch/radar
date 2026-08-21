@@ -24,6 +24,7 @@ import {
   DWD_COVERAGE,
   buildRadarTileUrl,
   cloudSlotFor,
+  dwdImageUrl,
   forecastTimes,
   frameLabel,
   haversineKm,
@@ -255,6 +256,13 @@ function updateFocus() {
 map.on('move zoom viewreset', updateLabelsClip);
 map.on('zoomend', updateForeignLabelZoom);
 
+// A page opened in a hidden tab boots with a 0x0 map; once the container gets
+// real dimensions, build the forecast overlays that were skipped.
+map.on('resize', () => {
+  updateForecast();
+  refreshForecastView();
+});
+
 /* ------------------------------------------------------------- location pin --- */
 
 const locationPin = L.marker([0, 0], {
@@ -333,44 +341,96 @@ function showClouds() {
 
 /**
  * DWD's WN composite (analysis + nowcast) extends the timeline past "now".
- * One WMS layer per 15-min step, opacity-switched like everything else.
- * Omitting REFERENCE_TIME makes GeoServer use the newest model run; a step
- * beyond that run's horizon answers with a WMS exception, which surfaces as a
- * tileerror and permanently drops that step for the current window.
+ * One single-image WMS overlay per 15-min step, opacity-switched like
+ * everything else. DWD's GeoServer takes ~5 s per GetMap and serializes a
+ * client's concurrent requests, so tiled loading could never finish — one
+ * padded-viewport image per step keeps the whole forecast at 8 requests,
+ * created nearest-first at boot and reused until the view outgrows the
+ * padding. A step beyond the newest run's horizon answers with a WMS
+ * exception (unloadable as an image), which drops that step after one retry.
  *
  * Honest caveats, also in the README: this is the German composite — it sees
  * Switzerland from outside, so the picture is coarser than the Swiss frames
  * before it, and Valais/Ticino sit at its range edge.
  */
-const forecastLayers = new Map(); // ISO time -> L.TileLayer.WMS
+const forecastLayers = new Map(); // ISO time -> {overlay, builtBounds, builtZoom, retried}
 
 const isoOf = (t) => new Date(t * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
 
+/**
+ * Padded view + image size for a forecast GetMap, or null while the map has
+ * no real size — a page booted in a hidden tab has a 0x0 container, and specs
+ * computed then are degenerate (point bbox, WIDTH=0). Building from them got
+ * every forecast frame dead-dropped; the map's 'resize' event triggers the
+ * rebuild once the container becomes visible.
+ */
+function forecastViewSpec() {
+  const size = map.getSize();
+  if (size.x < 50 || size.y < 50) return null;
+  const bounds = map.getBounds().pad(0.3);
+  const nw = L.CRS.EPSG3857.project(bounds.getNorthWest());
+  const se = L.CRS.EPSG3857.project(bounds.getSouthEast());
+  const bbox = [nw.x, se.y, se.x, nw.y].map(Math.round);
+  const width = Math.min(1600, Math.round(size.x * 1.6));
+  const height = Math.round((width * (bbox[3] - bbox[1])) / (bbox[2] - bbox[0]));
+  return { bounds, bbox, width, height };
+}
+
+function dropForecastFrame(t) {
+  const iso = isoOf(t);
+  const info = forecastLayers.get(iso);
+  if (info) {
+    map.removeLayer(info.overlay);
+    forecastLayers.delete(iso);
+  }
+  state.forecastDead.add(t);
+  state.forecast = state.forecast.filter((f) => f.time !== t);
+  syncScrub();
+  if (state.index >= activeFrames().length) showFrame(activeFrames().length - 1);
+}
+
 function forecastLayerFor(t) {
   const iso = isoOf(t);
-  if (forecastLayers.has(iso)) return forecastLayers.get(iso);
-  const layer = L.tileLayer.wms('https://maps.dwd.de/geoserver/dwd/wms', {
-    layers: 'dwd:Radar_wn-product_1x1km_ger',
-    format: 'image/png',
-    transparent: true,
-    version: '1.3.0',
-    opacity: 0,
-    zIndex: 400,
-    time: iso,
-    attribution: '',
+  if (forecastLayers.has(iso)) return forecastLayers.get(iso).overlay;
+  const spec = forecastViewSpec();
+  if (!spec) return null; // hidden/zero-size map — the 'resize' handler rebuilds
+  const overlay = L.imageOverlay(
+    dwdImageUrl(iso, spec.bbox, spec.width, spec.height),
+    spec.bounds,
+    { opacity: 0, zIndex: 400 },
+  );
+  const info = { overlay, builtBounds: spec.bounds, builtZoom: map.getZoom(), retried: false };
+  overlay.on('error', () => {
+    if (!info.retried) {
+      // Transient failure gets one retry; a WMS exception (beyond the newest
+      // run's horizon) fails identically twice and condemns the frame.
+      info.retried = true;
+      const s = forecastViewSpec();
+      if (!s) return; // map lost its size mid-flight; resize will rebuild
+      setTimeout(() => overlay.setUrl(dwdImageUrl(iso, s.bbox, s.width, s.height)), 2000);
+      return;
+    }
+    dropForecastFrame(t);
   });
-  layer.on('tileerror', () => {
-    if (state.forecastDead.has(t)) return;
-    state.forecastDead.add(t); // beyond the newest run's horizon
-    map.removeLayer(layer);
-    forecastLayers.delete(iso);
-    state.forecast = state.forecast.filter((f) => f.time !== t);
-    syncScrub();
-    if (state.index >= activeFrames().length) showFrame(activeFrames().length - 1);
-  });
-  layer.addTo(map);
-  forecastLayers.set(iso, layer);
-  return layer;
+  overlay.addTo(map);
+  forecastLayers.set(iso, info);
+  return overlay;
+}
+
+/** Re-request forecast images when the view leaves what they were built for. */
+function refreshForecastView() {
+  const spec = forecastViewSpec();
+  if (!spec) return;
+  const current = map.getBounds();
+  const zoom = map.getZoom();
+  for (const [iso, info] of forecastLayers) {
+    if (info.builtBounds.contains(current) && zoom - info.builtZoom < 2) continue;
+    info.builtBounds = spec.bounds;
+    info.builtZoom = zoom;
+    info.retried = false;
+    info.overlay.setBounds(spec.bounds);
+    info.overlay.setUrl(dwdImageUrl(iso, spec.bbox, spec.width, spec.height));
+  }
 }
 
 /** Rebuild the forecast tail whenever the newest observed frame or view changes. */
@@ -382,11 +442,16 @@ function updateForecast() {
 
   state.forecast = times.map((time) => ({ time, kind: 'nowcast' }));
 
+  // Create every layer up front (opacity 0) so its tiles load while the loop
+  // is still playing the observed frames — lazily creating them mid-forecast
+  // meant every frame's first appearance was blank.
+  for (const t of times) forecastLayerFor(t);
+
   // Prune layers and dead-marks that aged out of the window.
   const live = new Set(times.map(isoOf));
-  for (const [iso, layer] of forecastLayers) {
+  for (const [iso, info] of forecastLayers) {
     if (!live.has(iso)) {
-      map.removeLayer(layer);
+      map.removeLayer(info.overlay);
       forecastLayers.delete(iso);
     }
   }
@@ -674,15 +739,15 @@ function showFrame(i) {
     for (const overlay of state.ch.overlays.values()) overlay.setOpacity(0);
     const iso = isoOf(frame.time);
     forecastLayerFor(frame.time);
-    for (const [s, layer] of forecastLayers) layer.setOpacity(s === iso ? RADAR_OPACITY : 0);
+    for (const [s, info] of forecastLayers) info.overlay.setOpacity(s === iso ? RADAR_OPACITY : 0);
   } else if (state.source === 'ch') {
-    for (const layer of forecastLayers.values()) layer.setOpacity(0);
+    for (const info of forecastLayers.values()) info.overlay.setOpacity(0);
     for (const layer of state.layers.values()) layer.setOpacity(0);
     for (const [t, overlay] of state.ch.overlays) {
       overlay.setOpacity(t === frame.time ? RADAR_OPACITY : 0);
     }
   } else {
-    for (const layer of forecastLayers.values()) layer.setOpacity(0);
+    for (const info of forecastLayers.values()) info.overlay.setOpacity(0);
     for (const overlay of state.ch.overlays.values()) overlay.setOpacity(0);
     for (const [idx, layer] of state.layers) {
       if (idx !== state.index) layer.setOpacity(0);
@@ -812,6 +877,7 @@ document.addEventListener('keydown', (e) => {
 map.on('moveend', () => {
   refreshForecastForView();
   updateForecast(); // panning across the DWD coverage edge adds/removes the tail
+  refreshForecastView(); // re-request images the view has outgrown
   updateFocus(); // leaving the Swiss region restores the full-detail map
 });
 
@@ -821,12 +887,21 @@ document.addEventListener('visibilitychange', () => {
     clearInterval(state.timer);
     state.timer = null;
   } else {
+    // A page opened in a hidden tab boots with a 0x0 map and Leaflet only
+    // re-measures on window resize — force it, so the forecast overlays that
+    // were skipped at boot (see forecastViewSpec) get built now.
+    map.invalidateSize();
     if (state.playing) setPlaying(true);
     refreshAll();
   }
 });
 
 function refreshAll() {
+  // Give condemned forecast steps another chance each cycle — a burst of
+  // transient failures (hidden tab, flaky network) must not kill the forecast
+  // for the rest of the session. Genuine beyond-horizon steps just fail their
+  // two attempts again, which is cheap.
+  state.forecastDead.clear();
   loadFrames();
   if (ui.ch.checked) {
     swissLoadFrames().catch((err) => {
